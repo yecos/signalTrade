@@ -5,8 +5,8 @@
   "regions": ["iad1"],
   "crons": [
     {
-      "path": "/api/signals/check-pending?cron=daily",
-      "schedule": "0 0 * * *"
+      "path": "/api/cron?cron=5min",
+      "schedule": "*/5 * * * *"
     }
   ]
 }

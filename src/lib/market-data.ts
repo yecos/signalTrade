@@ -339,6 +339,61 @@ export async function seedMarketData(): Promise<void> {
   console.log('Market data seeding complete!');
 }
 
+// === SEED CANDLES FROM REAL MARKET ENGINE ===
+// Pulls real candles from Binance/CoinGecko/TwelveData and saves to DB
+// This ensures we have real data for analysis even when the engine is not actively queried
+export async function seedCandlesFromEngine(asset: string, timeframe: string = 'M5'): Promise<number> {
+  try {
+    // Dynamic import to avoid circular dependency
+    const { getCandles: getEngineCandles } = await import('./market-engine');
+    const result = await getEngineCandles(asset, timeframe, 100);
+
+    if (!result.candles || result.candles.length === 0) {
+      return 0;
+    }
+
+    let saved = 0;
+    // Save each candle to DB (upsert to avoid duplicates)
+    for (const candle of result.candles) {
+      try {
+        const timestamp = new Date(candle.timestamp);
+        await db.marketCandle.upsert({
+          where: {
+            asset_timeframe_timestamp: {
+              asset,
+              timeframe,
+              timestamp,
+            },
+          },
+          create: {
+            asset,
+            timeframe,
+            timestamp,
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          },
+          update: {
+            open: candle.open,
+            high: candle.high,
+            low: candle.low,
+            close: candle.close,
+            volume: candle.volume,
+          },
+        });
+        saved++;
+      } catch {
+        // Skip individual candle errors
+      }
+    }
+    return saved;
+  } catch {
+    return 0;
+  }
+}
+
 // === GET SPREAD ===
 export function getSpread(asset: string): number {
   const config = ASSET_CONFIGS[asset] || ASSET_CONFIGS['EUR/USD'];

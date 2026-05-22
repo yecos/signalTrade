@@ -248,11 +248,12 @@ function computeImbalance(candles: Candle[]): boolean {
 function computeSession(candles: Candle[]): { session: string; overlap: boolean } {
   const last = candles.length - 1;
   const timestamp = candles[last].timestamp;
-  const sessionInfo = detectSession(timestamp);
+  const d = timestamp instanceof Date ? timestamp : new Date(timestamp);
+  const sessionInfo = detectSession(d);
 
   // London/NY overlap detection
-  const hourUtc = timestamp.getUTCHours();
-  const minuteUtc = timestamp.getUTCMinutes();
+  const hourUtc = d.getUTCHours();
+  const minuteUtc = d.getUTCMinutes();
   const timeInMinutes = hourUtc * 60 + minuteUtc;
   const isOverlap = timeInMinutes >= 12 * 60 && timeInMinutes < 16 * 60;
 

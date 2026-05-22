@@ -79,9 +79,11 @@ export const SESSIONS: Record<SessionType, SessionInfo> = {
 
 // === DETECT CURRENT SESSION ===
 
-export function detectSession(date: Date = new Date()): SessionInfo {
-  const hourUtc = date.getUTCHours();
-  const minuteUtc = date.getUTCMinutes();
+export function detectSession(date: Date | number | string = new Date()): SessionInfo {
+  // Ensure we have a proper Date object
+  const d = date instanceof Date ? date : new Date(date);
+  const hourUtc = d.getUTCHours();
+  const minuteUtc = d.getUTCMinutes();
   const timeInMinutes = hourUtc * 60 + minuteUtc;
   
   // Overlap: 12:00-16:00 UTC (takes priority)
