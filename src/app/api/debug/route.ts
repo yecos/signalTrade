@@ -78,18 +78,10 @@ export async function GET() {
     };
   }
 
-  // 4. Test Market Engine
+  // 4. Test Market Engine (getEngineStatus now auto-health-checks)
   try {
-    const { getEngineStatus, checkApiHealth } = await import("@/lib/market-engine");
-    diagnostics.marketEngine = getEngineStatus();
-
-    // Quick health check (with timeout)
-    const healthPromise = checkApiHealth();
-    const timeoutPromise = new Promise<{ timeout: true }>((resolve) =>
-      setTimeout(() => resolve({ timeout: true }), 8000)
-    );
-    const healthResult = await Promise.race([healthPromise, timeoutPromise]);
-    diagnostics.marketHealth = healthResult;
+    const { getEngineStatus } = await import("@/lib/market-engine");
+    diagnostics.marketEngine = await getEngineStatus();
   } catch (engineErr: unknown) {
     diagnostics.marketEngineError = engineErr instanceof Error ? engineErr.message : String(engineErr);
   }

@@ -23,9 +23,9 @@ export async function GET(request: NextRequest) {
     const { searchParams } = new URL(request.url);
     const mode = searchParams.get('mode');
 
-    // /api/market-data?mode=status → engine status
+    // /api/market-data?mode=status → engine status (with auto-health-check)
     if (mode === 'status') {
-      const status = getEngineStatus();
+      const status = await getEngineStatus();
       return NextResponse.json({
         ...status,
         twelveDataApiKeySet: getTwelveDataApiKeyStatus(),
@@ -47,6 +47,7 @@ export async function GET(request: NextRequest) {
     const result = await getEngineCandles(asset, timeframe, count);
 
     if (result.candles.length > 0) {
+      const engineStatus = await getEngineStatus();
       return NextResponse.json({
         asset,
         timeframe,
@@ -54,12 +55,13 @@ export async function GET(request: NextRequest) {
         candles: result.candles.slice(-count),
         source: result.source,
         availableAssets: Object.keys(ASSET_CONFIGS),
-        engineStatus: getEngineStatus(),
+        engineStatus,
       });
     }
 
     // Fallback to DB candles (legacy)
     const candles = await getDBCandles(asset, timeframe, count);
+    const engineStatus = await getEngineStatus();
 
     return NextResponse.json({
       asset,
@@ -76,7 +78,7 @@ export async function GET(request: NextRequest) {
       })),
       source: 'FALLBACK',
       availableAssets: Object.keys(ASSET_CONFIGS),
-      engineStatus: getEngineStatus(),
+      engineStatus,
     });
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : 'Unknown error';
@@ -116,9 +118,10 @@ export async function POST(request: NextRequest) {
 
       case 'check-health': {
         const health = await checkApiHealth();
+        const engineStatus = await getEngineStatus();
         return NextResponse.json({
           health,
-          engineStatus: getEngineStatus(),
+          engineStatus,
         });
       }
 
@@ -131,7 +134,6 @@ export async function POST(request: NextRequest) {
           );
         }
         setTwelveDataApiKey(apiKey);
-        // Verify key works
         const health = await checkApiHealth();
         return NextResponse.json({
           success: true,
@@ -156,10 +158,7 @@ export async function POST(request: NextRequest) {
 
       default:
         return NextResponse.json(
-          {
-            error:
-              'Invalid action. Use: generate, seed, check-health, set-api-key, get-price',
-          },
+          { error: 'Invalid action. Use: generate, seed, check-health, set-api-key, get-price' },
           { status: 400 }
         );
     }

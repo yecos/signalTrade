@@ -23,8 +23,8 @@ export async function GET() {
       ? JSON.parse(configSetting.value)
       : DEFAULT_CONFIG;
 
-    // Get market engine status
-    const marketStatus = getEngineStatus();
+    // Get market engine status (async with auto-health-check)
+    const marketStatus = await getEngineStatus();
 
     // Get analysis modes per asset
     const analysisModes: Record<string, string> = {};
