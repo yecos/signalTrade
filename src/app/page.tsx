@@ -539,6 +539,11 @@ export default function TradingDashboard() {
   // Auto-trader config form
   const [selectedAssets, setSelectedAssets] = useState<string[]>(["EUR/USD", "GBP/USD", "BTC/USD"]);
 
+  // Client-only state to avoid hydration mismatch
+  const [currentSession, setCurrentSession] = useState<{ session: string; sessionEs: string; icon: React.ReactNode; nextSession: string; nextStart: string } | null>(null);
+  const [nextCountdown, setNextCountdown] = useState("");
+  const [mounted, setMounted] = useState(false);
+
   // ─── Fetch functions ─────────────────────────────────────────────────────
 
   const fetchStats = useCallback(async () => {
@@ -772,8 +777,17 @@ export default function TradingDashboard() {
 
   const confidenceChartData = insights?.confidenceAnalysis.filter((c) => c.total > 0) || [];
 
-  const currentSession = detectCurrentSession();
-  const nextCountdown = getNextSessionCountdown();
+  // Update session info on client only (avoids hydration mismatch)
+  useEffect(() => {
+    setMounted(true);
+    const updateSession = () => {
+      setCurrentSession(detectCurrentSession());
+      setNextCountdown(getNextSessionCountdown());
+    };
+    updateSession();
+    const interval = setInterval(updateSession, 60000); // update every minute
+    return () => clearInterval(interval);
+  }, []);
 
   const totalDecisive = stats ? stats.winCount + stats.lossCount : 0;
   const datasetGoal = 1000;
@@ -853,6 +867,17 @@ export default function TradingDashboard() {
               {/* Session Banner */}
               <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
                 <CardContent className="p-4">
+                  {!currentSession ? (
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full flex items-center justify-center bg-white/5">
+                        <Clock className="size-5 text-white/30" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold text-white/30">Cargando sesión...</div>
+                        <div className="text-xs text-white/20">Sesión actual</div>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex items-center justify-between flex-wrap gap-3">
                     <div className="flex items-center gap-3">
                       <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session] }}>
@@ -876,6 +901,7 @@ export default function TradingDashboard() {
                       </div>
                     </div>
                   </div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -1402,6 +1428,17 @@ export default function TradingDashboard() {
               {/* Current Session Panel */}
               <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
                 <CardContent className="p-5">
+                  {!currentSession ? (
+                    <div className="flex items-center gap-4">
+                      <div className="w-14 h-14 rounded-xl flex items-center justify-center bg-white/5">
+                        <Clock className="size-6 text-white/30" />
+                      </div>
+                      <div>
+                        <div className="text-lg font-bold text-white/30">Cargando...</div>
+                        <div className="text-xs text-white/20">Detectando sesión actual</div>
+                      </div>
+                    </div>
+                  ) : (
                   <div className="flex items-center gap-4 flex-wrap">
                     <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session] }}>
                       {currentSession.icon}
@@ -1421,6 +1458,7 @@ export default function TradingDashboard() {
                       </div>
                     </div>
                   </div>
+                  )}
                 </CardContent>
               </Card>
 
@@ -1443,12 +1481,14 @@ export default function TradingDashboard() {
                       ))}
                     </div>
                     {/* Current time indicator */}
+                    {mounted && (
                     <div className="absolute top-0 h-full flex items-end" style={{ left: `${((new Date().getUTCHours() * 60 + new Date().getUTCMinutes()) / 1440) * 100}%` }}>
                       <div className="w-0.5 h-8 bg-white/80 -translate-x-1/2" />
                       <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[8px] text-white/70 bg-white/10 px-1 rounded">
                         {new Date().getUTCHours().toString().padStart(2, "0")}:{new Date().getUTCMinutes().toString().padStart(2, "0")} UTC
                       </div>
                     </div>
+                    )}
                     <div className="flex justify-between mt-1">
                       <span className="text-[8px] text-white/20">00:00</span>
                       <span className="text-[8px] text-white/20">06:00</span>
