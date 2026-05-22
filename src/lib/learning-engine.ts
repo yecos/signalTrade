@@ -193,7 +193,7 @@ export async function runLearningAnalysis(): Promise<LearningReport> {
     const isSignificant = pValue < 0.05 && decisive >= 30;
     
     // Detect regime change
-    const regime = await detectRegimeChange(stat.patternType, stat.session, stat.asset);
+    const regime = await detectRegimeChange(stat.patternType, stat.session || 'OffHours', stat.asset);
     
     // Calculate edge magnitude (how far from 50%)
     const edgeMagnitude = Math.abs(stat.winRate - 50);
@@ -242,8 +242,7 @@ export async function runLearningAnalysis(): Promise<LearningReport> {
     
     discoveries.push({
       patternType: stat.patternType,
-      session: stat.session,
-      asset: stat.asset,
+      session: stat.session || 'OffHours',      asset: stat.asset,
       totalSignals: stat.totalSignals,
       wins: stat.wins,
       losses: stat.losses,
@@ -381,6 +380,7 @@ export async function getSetupRecommendations(): Promise<SetupRecommendation[]> 
 
 /**
  * Quick check: does this setup have a positive edge?
+ * Uses Bayesian-adjusted win rate when available.
  * Used by the auto-trader to decide whether to generate a signal.
  */
 export async function hasEdge(
@@ -410,10 +410,197 @@ export async function hasEdge(
   const decisive = stat.wins + stat.losses;
   const pValue = approximatePValue(stat.wins, decisive);
   
+  // Use Bayesian WR for edge determination when available
+  const wrForEdge = stat.bayesianWinRate > 0 ? stat.bayesianWinRate : stat.winRate;
+  
   return {
-    hasEdge: stat.winRate > 53 && pValue < 0.1 && decisive >= 10,
-    winRate: Math.round(stat.winRate * 10) / 10,
+    hasEdge: wrForEdge > 53 && pValue < 0.1 && decisive >= 10,
+    winRate: Math.round(wrForEdge * 10) / 10,
     sampleSize: decisive,
     confidence: decisive >= 100 ? 80 : decisive >= 30 ? 50 : 20,
   };
 }
+
+// ─── Feature Importance ────────────────────────────────────────────────────────
+// "Descubrir qué variables importan más"
+// Analyzes which features (from featuresJson) correlate most with WIN vs LOSS outcomes.
+
+export interface FeatureImportance {
+  feature: string;
+  avgWin: number;       // Average value of this feature in WIN signals
+  avgLoss: number;      // Average value of this feature in LOSS signals
+  diff: number;         // avgWin - avgLoss (positive = higher in wins)
+  absDiff: number;      // Absolute difference
+  importance: number;   // 0-100: relative importance (normalized)
+  direction: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL'; // Higher in wins or losses?
+  description: string;  // Spanish description
+}
+
+export async function calculateFeatureImportance(): Promise<{
+  features: FeatureImportance[];
+  sampleSize: number;
+  topPositive: string[];
+  topNegative: string[];
+  recommendations: string[];
+}> {
+  // Get closed WIN/LOSS signals that have featuresJson
+  const signals = await db.signal.findMany({
+    where: {
+      status: 'CLOSED',
+      result: { in: ['WIN', 'LOSS'] },
+      featuresJson: { not: null },
+    },
+    select: {
+      result: true,
+      featuresJson: true,
+    },
+    take: 1000, // Limit for performance
+  });
+  
+  if (signals.length < 20) {
+    return {
+      features: [],
+      sampleSize: signals.length,
+      topPositive: [],
+      topNegative: [],
+      recommendations: ['Datos insuficientes para feature importance. Necesitas mínimo 20 señales con features.'],
+    };
+  }
+  
+  // Parse all features
+  const winFeatures: Record<string, number[]> = {};
+  const lossFeatures: Record<string, number[]> = {};
+  
+  for (const signal of signals) {
+    if (!signal.featuresJson) continue;
+    
+    let features: Record<string, any>;
+    try {
+      features = JSON.parse(signal.featuresJson);
+    } catch {
+      continue;
+    }
+    
+    const target = signal.result === 'WIN' ? winFeatures : lossFeatures;
+    
+    for (const [key, value] of Object.entries(features)) {
+      if (typeof value === 'number' && !isNaN(value)) {
+        if (!target[key]) target[key] = [];
+        target[key].push(value);
+      }
+    }
+  }
+  
+  // Calculate averages and importance for numeric features
+  const allKeys = new Set([...Object.keys(winFeatures), ...Object.keys(lossFeatures)]);
+  const results: FeatureImportance[] = [];
+  
+  for (const key of allKeys) {
+    const wVals = winFeatures[key] || [];
+    const lVals = lossFeatures[key] || [];
+    
+    if (wVals.length < 5 || lVals.length < 5) continue; // Need minimum samples
+    
+    const avgWin = wVals.reduce((a, b) => a + b, 0) / wVals.length;
+    const avgLoss = lVals.reduce((a, b) => a + b, 0) / lVals.length;
+    const diff = avgWin - avgLoss;
+    
+    // Normalize importance by the range of the feature
+    const allVals = [...wVals, ...lVals];
+    const featureMin = Math.min(...allVals);
+    const featureMax = Math.max(...allVals);
+    const featureRange = featureMax - featureMin || 1;
+    const normalizedDiff = Math.abs(diff) / featureRange;
+    
+    const direction: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' = 
+      Math.abs(diff) < featureRange * 0.05 ? 'NEUTRAL' :
+      diff > 0 ? 'POSITIVE' : 'NEGATIVE';
+    
+    results.push({
+      feature: key,
+      avgWin: Math.round(avgWin * 1000) / 1000,
+      avgLoss: Math.round(avgLoss * 1000) / 1000,
+      diff: Math.round(diff * 1000) / 1000,
+      absDiff: Math.round(Math.abs(diff) * 1000) / 1000,
+      importance: 0, // Will be normalized below
+      direction,
+      description: '',
+    });
+  }
+  
+  // Normalize importance to 0-100
+  const maxAbsDiff = Math.max(...results.map(r => r.absDiff), 0.001);
+  for (const r of results) {
+    r.importance = Math.round((r.absDiff / maxAbsDiff) * 100);
+    
+    // Generate Spanish description
+    const featureName = FEATURE_DISPLAY_NAMES[r.feature] || r.feature;
+    if (r.direction === 'POSITIVE') {
+      r.description = `${featureName}: más alto en WIN (${r.avgWin.toFixed(2)}) vs LOSS (${r.avgLoss.toFixed(2)}). Diferencia +${r.absDiff.toFixed(3)}. Feature con correlación positiva.`;
+    } else if (r.direction === 'NEGATIVE') {
+      r.description = `${featureName}: más bajo en WIN (${r.avgWin.toFixed(2)}) vs LOSS (${r.avgLoss.toFixed(2)}). Diferencia -${r.absDiff.toFixed(3)}. Feature con correlación negativa.`;
+    } else {
+      r.description = `${featureName}: sin diferencia significativa entre WIN y LOSS. Probablemente no es predictivo.`;
+    }
+  }
+  
+  // Sort by importance
+  results.sort((a, b) => b.importance - a.importance);
+  
+  // Top features
+  const topPositive = results.filter(r => r.direction === 'POSITIVE').slice(0, 5).map(r => r.feature);
+  const topNegative = results.filter(r => r.direction === 'NEGATIVE').slice(0, 5).map(r => r.feature);
+  
+  // Recommendations
+  const recommendations: string[] = [];
+  if (results.length === 0) {
+    recommendations.push('No hay suficientes features numéricos para analizar. Sigue recolectando datos.');
+  } else {
+    const top3 = results.slice(0, 3);
+    recommendations.push(`Las 3 features más importantes: ${top3.map(f => FEATURE_DISPLAY_NAMES[f.feature] || f.feature).join(', ')}`);
+    if (topPositive.length > 0) {
+      recommendations.push(`Features positivas (más altas en WIN): ${topPositive.map(f => FEATURE_DISPLAY_NAMES[f] || f).join(', ')}`);
+    }
+    if (topNegative.length > 0) {
+      recommendations.push(`Features negativas (más bajas en WIN): ${topNegative.map(f => FEATURE_DISPLAY_NAMES[f] || f).join(', ')}`);
+    }
+    if (signals.length < 100) {
+      recommendations.push(`Muestra pequeña (${signals.length} señales). Feature importance mejorará con más datos.`);
+    }
+  }
+  
+  return {
+    features: results,
+    sampleSize: signals.length,
+    topPositive,
+    topNegative,
+    recommendations,
+  };
+}
+
+// Feature display names for UI
+const FEATURE_DISPLAY_NAMES: Record<string, string> = {
+  trend_strength: 'Fuerza de Tendencia',
+  distance_to_ema: 'Distancia a EMA',
+  candle_range: 'Rango de Vela',
+  wick_ratio: 'Ratio de Mecha',
+  body_direction: 'Dirección del Cuerpo',
+  price_efficiency: 'Eficiencia de Precio',
+  sweep_high: 'Barrido Superior',
+  sweep_low: 'Barrido Inferior',
+  equal_highs: 'Máximos Iguales',
+  equal_lows: 'Mínimos Iguales',
+  imbalance: 'Desequilibrio',
+  session: 'Sesión',
+  overlap: 'Solape',
+  spread_estimate: 'Spread Estimado',
+  market_speed: 'Velocidad de Mercado',
+  volatility_percentile: 'Percentil Volatilidad',
+  volume_percentile: 'Percentil Volumen',
+  rsi_zone: 'Zona RSI',
+  macd_signal: 'Señal MACD',
+  bb_position: 'Posición BB',
+  stoch_zone: 'Zona Estocástico',
+  market_regime: 'Régimen de Mercado',
+  regime_confidence: 'Confianza de Régimen',
+};

@@ -1,9 +1,9 @@
-// Learning Engine API: Edge discovery, regime detection, setup recommendations
+// Learning Engine API: Edge discovery, regime detection, setup recommendations, feature importance
 
 import { NextRequest, NextResponse } from 'next/server';
-import { runLearningAnalysis, getSetupRecommendations, hasEdge } from '@/lib/learning-engine';
+import { runLearningAnalysis, getSetupRecommendations, hasEdge, calculateFeatureImportance } from '@/lib/learning-engine';
 
-// GET: Learning report or setup recommendations
+// GET: Learning report, setup recommendations, edge check, or feature importance
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url);
@@ -20,6 +20,11 @@ export async function GET(request: NextRequest) {
       const asset = searchParams.get('asset') || 'EUR/USD';
       const edge = await hasEdge(pattern, session, asset);
       return NextResponse.json(edge);
+    }
+
+    if (mode === 'feature-importance') {
+      const importance = await calculateFeatureImportance();
+      return NextResponse.json(importance);
     }
 
     // Default: full learning report

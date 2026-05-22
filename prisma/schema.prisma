@@ -44,6 +44,20 @@ model Signal {
   source                 String   @default("MANUAL") // MANUAL, AUTO, AI
   noOperarReason         String?  // Why NO_OPERAR was chosen
   verificationMethod     String?  // SIMULATED, REAL
+  // === REGIME & FEATURES (Phase 4) ===
+  marketRegime           String?  // TRENDING, RANGING, VOLATILE, LOW_VOL, NEWS, LIQUIDITY_TRAP
+  featuresJson           String?  // JSON: 20+ computed features at signal time
+  // === EXPECTANCY (Phase 4) ===
+  expectancy             Float?   // Expected value (EV) per unit risk
+  riskReward             Float?   // Risk/reward ratio at signal time
+  adjustedWinRate        Float?   // Bayesian adjusted win rate
+  // === BAYESIAN STATS (Phase 4) ===
+  confidenceInterval     String?  // JSON: {lower, upper} - 95% CI for this setup
+  pValue                 Float?   // P-value for this setup's edge
+  sampleVariance         Float?   // Variance of results for this setup
+  // === QUALITY (Phase 4) ===
+  qualityScore           Float?   // 0-100: quality filter composite score
+  qualityFlags           String?  // JSON: array of quality flags (low_liquidity, high_spread, etc.)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
@@ -78,6 +92,17 @@ model SetupStats {
   winRate       Float    @default(0)
   avgConfidence Float    @default(0)
   avgSetupScore Float    @default(0)
+  // === BAYESIAN STATS (Phase 4) ===
+  bayesianWinRate        Float    @default(0)  // Bayesian adjusted WR with prior
+  confidenceIntervalLower Float   @default(0)  // 95% CI lower bound
+  confidenceIntervalUpper Float   @default(0)  // 95% CI upper bound
+  pValue                 Float    @default(1)  // P-value vs H0: WR=50%
+  sampleVariance         Float    @default(0)  // Variance of outcomes
+  // === EXPECTANCY (Phase 4) ===
+  avgExpectancy          Float    @default(0)  // Average EV per trade
+  avgRiskReward          Float    @default(0)  // Average risk/reward ratio
+  // === QUALITY (Phase 4) ===
+  avgQualityScore        Float    @default(0)  // Average quality score
   lastUpdated   DateTime @updatedAt
   createdAt     DateTime @default(now())
 

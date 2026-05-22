@@ -478,7 +478,7 @@ export function computeAllIndicators(candles: Candle[]): IndicatorSnapshot {
   
   // Determine trend
   let trend: IndicatorSnapshot['trend'] = 'RANGING';
-  if (currentSma20 && currentSma50 && currentEma12) {
+  if (currentSma20 && currentSma50 && currentEma12 && currentEma26) {
     if (currentPrice > currentSma20 && currentSma20 > currentSma50 && currentEma12 > currentEma26) {
       trend = 'BULLISH';
     } else if (currentPrice < currentSma20 && currentSma20 < currentSma50 && currentEma12 < currentEma26) {

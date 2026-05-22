@@ -75,6 +75,17 @@ interface Signal {
   noOperarReason: string | null;
   createdAt: string;
   updatedAt: string;
+  // Phase 4 fields
+  marketRegime: string | null;
+  featuresJson: string | null;
+  expectancy: number | null;
+  riskReward: number | null;
+  adjustedWinRate: number | null;
+  confidenceInterval: string | null;
+  pValue: number | null;
+  sampleVariance: number | null;
+  qualityScore: number | null;
+  qualityFlags: string | null;
 }
 
 interface Stats {
@@ -196,6 +207,14 @@ interface SetupScoreEntry {
   avgConfidence: number;
   edge: "POSITIVE" | "NEGATIVE" | "NEUTRAL" | "UNKNOWN";
   sampleAdequacy: "INSUFFICIENT" | "LOW" | "MEDIUM" | "HIGH";
+  // Phase 4 fields
+  bayesianWinRate: number;
+  confidenceIntervalLower: number;
+  confidenceIntervalUpper: number;
+  pValue: number;
+  avgExpectancy: number;
+  avgRiskReward: number;
+  avgQualityScore: number;
 }
 
 interface SetupScoresResponse {
@@ -271,6 +290,24 @@ const SESSION_COLORS: Record<string, string> = {
   NewYork: "#00ff88",
   Overlap: "#ffaa00",
   OffHours: "#666666",
+};
+
+const REGIME_NAMES: Record<string, string> = {
+  TRENDING: 'Tendencia',
+  RANGING: 'Rango',
+  VOLATILE: 'Volátil',
+  LOW_VOL: 'Baja Vol.',
+  NEWS: 'Noticias',
+  LIQUIDITY_TRAP: 'Trampa Liquidez',
+};
+
+const REGIME_COLORS: Record<string, string> = {
+  TRENDING: '#00ff88',
+  RANGING: '#ffaa00',
+  VOLATILE: '#ff3366',
+  LOW_VOL: '#666666',
+  NEWS: '#aa66ff',
+  LIQUIDITY_TRAP: '#ff8800',
 };
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -517,6 +554,64 @@ function AnalysisModeBadge({ mode }: { mode: string | null }) {
     <Badge className={`${c.bg} text-[10px] px-1.5 py-0 border`}>
       {c.label}
     </Badge>
+  );
+}
+
+function RegimeBadge({ regime }: { regime: string | null }) {
+  if (!regime) return <span className="text-white/30 text-xs">—</span>;
+  const name = REGIME_NAMES[regime] || regime;
+  const color = REGIME_COLORS[regime] || "#666";
+  return (
+    <Badge className="text-[10px] px-1.5 py-0" style={{ backgroundColor: `${color}20`, color, borderColor: `${color}40` }}>
+      {name}
+    </Badge>
+  );
+}
+
+function DataSourceIndicators({ dataAvailability }: { dataAvailability: string | null }) {
+  if (!dataAvailability) return <span className="text-white/30 text-[9px]">—</span>;
+  let parsed: Record<string, boolean> = {};
+  try {
+    parsed = JSON.parse(dataAvailability);
+  } catch {
+    return <span className="text-white/30 text-[9px]">—</span>;
+  }
+  const sources = [
+    { key: "market", label: "Market" },
+    { key: "volume", label: "Volume" },
+    { key: "technical", label: "Technical" },
+    { key: "patterns", label: "Patterns" },
+    { key: "regime", label: "Regime" },
+    { key: "quality", label: "Quality" },
+  ];
+  return (
+    <div className="flex items-center gap-1">
+      {sources.map((s) => {
+        const available = parsed[s.key] === true;
+        return (
+          <span key={s.key} className="flex items-center" title={`${s.label}: ${available ? "Disponible" : "No disponible"}`}>
+            {available ? (
+              <CheckCircle className="size-2.5 text-[#00ff88]" />
+            ) : (
+              <XCircle className="size-2.5 text-white/20" />
+            )}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
+function QualityMiniBar({ score }: { score: number | null }) {
+  if (score === null) return <span className="text-white/30 text-[10px]">—</span>;
+  const color = score > 70 ? "#00ff88" : score >= 40 ? "#ffaa00" : "#ff3366";
+  return (
+    <div className="flex items-center gap-1">
+      <div className="w-8 h-1.5 bg-white/10 rounded-full overflow-hidden">
+        <div className="h-full rounded-full" style={{ width: `${Math.min(100, score)}%`, backgroundColor: color }} />
+      </div>
+      <span className="text-[9px] font-mono" style={{ color }}>{score.toFixed(0)}</span>
+    </div>
   );
 }
 
@@ -1163,14 +1258,62 @@ export default function TradingDashboard() {
               </Card>
 
               {/* KPI Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
                 <StatCard title="Total Señales" value={stats?.totalSignals || 0} icon={<Activity className="size-5" />} color={NEON_BLUE} />
                 <StatCard title="Win Rate" value={`${stats?.winRate.toFixed(1) || 0}%`} icon={<Target className="size-5" />} color={stats && stats.winRate >= 60 ? NEON_GREEN : NEON_RED} />
+                <StatCard title="WR Bayesiana" value={`${setupScores?.scores.length ? (setupScores.scores.reduce((a, s) => a + (s.bayesianWinRate ?? 0), 0) / setupScores.scores.length).toFixed(1) : "0"}%`} icon={<Brain className="size-5" />} color={NEON_PURPLE} subtitle="Promedio ajustado" />
                 <StatCard title="Profit Factor" value={stats?.profitFactor === -1 ? "∞" : (stats?.profitFactor || 0).toFixed(2)} icon={<TrendingUp className="size-5" />} color={stats && stats.profitFactor >= 1.5 ? NEON_GREEN : NEON_YELLOW} />
                 <StatCard title="Pendientes" value={stats?.pendingCount || 0} icon={<Clock className="size-5" />} color={NEON_YELLOW} />
                 <StatCard title="NO OPERAR" value={stats?.noOperarCount || 0} icon={<Shield className="size-5" />} color={NEON_BLUE} />
                 <StatCard title="Muestra" value={totalDecisive} icon={<Database className="size-5" />} color={totalDecisive >= 100 ? NEON_GREEN : totalDecisive >= 30 ? NEON_YELLOW : NEON_RED} />
               </div>
+
+              {/* Regime Detection */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-white text-sm flex items-center gap-2">
+                    <Gauge className="size-4 text-[#00ffcc]" /> Detección de Régimen de Mercado
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {signals.length > 0 ? (() => {
+                    const latestSignal = signals.find(s => s.marketRegime);
+                    const regime = latestSignal?.marketRegime || null;
+                    const regimeColor = regime ? (REGIME_COLORS[regime] || "#666") : "#666";
+                    return (
+                      <div className="flex items-center justify-between flex-wrap gap-3">
+                        <div className="flex items-center gap-3">
+                          <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: `${regimeColor}20`, color: regimeColor }}>
+                            {regime === "TRENDING" ? <TrendingUp className="size-5" /> :
+                             regime === "RANGING" ? <MinusCircle className="size-5" /> :
+                             regime === "VOLATILE" ? <AlertTriangle className="size-5" /> :
+                             regime === "LOW_VOL" ? <WifiOff className="size-5" /> :
+                             regime === "NEWS" ? <Bell className="size-5" /> :
+                             regime === "LIQUIDITY_TRAP" ? <Crosshair className="size-5" /> :
+                             <Gauge className="size-5" />}
+                          </div>
+                          <div>
+                            <div className="text-sm font-semibold" style={{ color: regimeColor }}>
+                              {regime ? (REGIME_NAMES[regime] || regime) : "Sin datos"}
+                            </div>
+                            <div className="text-xs text-white/40">Régimen detectado más reciente</div>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <RegimeBadge regime={regime} />
+                          {latestSignal && (
+                            <span className="text-[9px] text-white/30">
+                              Basado en señal del {formatTime(latestSignal.entryTime)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })() : (
+                    <div className="text-xs text-white/30 text-center py-2">Sin datos de régimen. Genera señales para detectar el régimen de mercado.</div>
+                  )}
+                </CardContent>
+              </Card>
 
               {/* Statistical Reliability Banner */}
               <Card className={`border ${reliabilityLevel === "HIGH" ? "bg-[#00ff88]/5 border-[#00ff88]/20" : reliabilityLevel === "MEDIUM" ? "bg-[#ffaa00]/5 border-[#ffaa00]/20" : reliabilityLevel === "LOW" ? "bg-[#ff8800]/5 border-[#ff8800]/20" : "bg-[#ff3366]/5 border-[#ff3366]/20"}`}>
@@ -1373,7 +1516,11 @@ export default function TradingDashboard() {
                           <TableHead className="text-white/50 text-[10px]">Resultado</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Régimen</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Setup</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">EV</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Calidad</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Datos</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Fuente</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Modo</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Acción</TableHead>
@@ -1382,7 +1529,7 @@ export default function TradingDashboard() {
                       <TableBody>
                         {signals.length === 0 ? (
                           <TableRow>
-                            <TableCell colSpan={12} className="text-center text-white/30 py-8 text-sm">No hay señales registradas</TableCell>
+                            <TableCell colSpan={16} className="text-center text-white/30 py-8 text-sm">No hay señales registradas</TableCell>
                           </TableRow>
                         ) : (
                           signals
@@ -1409,7 +1556,13 @@ export default function TradingDashboard() {
                               </TableCell>
                               <TableCell><PatternBadge pattern={signal.patternType} /></TableCell>
                               <TableCell><SessionBadge session={signal.sessionType} /></TableCell>
+                              <TableCell><RegimeBadge regime={signal.marketRegime} /></TableCell>
                               <TableCell><SetupScoreBar score={signal.setupScore} /></TableCell>
+                              <TableCell className="text-[10px] font-mono" style={{ color: (signal.expectancy ?? 0) > 0 ? NEON_GREEN : (signal.expectancy ?? 0) < 0 ? NEON_RED : "#666" }}>
+                                {signal.expectancy !== null ? signal.expectancy.toFixed(2) : "—"}
+                              </TableCell>
+                              <TableCell><QualityMiniBar score={signal.qualityScore} /></TableCell>
+                              <TableCell><DataSourceIndicators dataAvailability={signal.dataAvailability} /></TableCell>
                               <TableCell><SourceBadge source={signal.source} /></TableCell>
                               <TableCell><AnalysisModeBadge mode={signal.analysisMode} /></TableCell>
                               <TableCell>
@@ -1602,7 +1755,11 @@ export default function TradingDashboard() {
                           <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Total</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Win Rate</TableHead>
-                          <TableHead className="text-white/50 text-[10px]">Avg Setup</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">WR Bayesiana</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">IC 95%</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">p-value</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">EV</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">R:R</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Muestra</TableHead>
                         </TableRow>
@@ -1617,8 +1774,20 @@ export default function TradingDashboard() {
                             <TableCell className="text-[10px] font-mono" style={{ color: s.winRate >= 60 ? NEON_GREEN : s.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>
                               {s.winRate.toFixed(1)}%
                             </TableCell>
-                            <TableCell className="text-[10px] font-mono" style={{ color: setupScoreColor(s.avgSetupScore) }}>
-                              {s.avgSetupScore.toFixed(0)}
+                            <TableCell className="text-[10px] font-mono" style={{ color: (s.bayesianWinRate ?? 0) >= 60 ? NEON_GREEN : (s.bayesianWinRate ?? 0) >= 50 ? NEON_YELLOW : NEON_RED }}>
+                              {(s.bayesianWinRate ?? 0).toFixed(1)}%
+                            </TableCell>
+                            <TableCell className="text-[10px] font-mono text-white/50">
+                              {(s.confidenceIntervalLower ?? 0).toFixed(1)}%–{(s.confidenceIntervalUpper ?? 0).toFixed(1)}%
+                            </TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: (s.pValue ?? 1) < 0.05 ? NEON_GREEN : (s.pValue ?? 1) < 0.1 ? NEON_YELLOW : NEON_RED }}>
+                              {(s.pValue ?? 1).toFixed(3)}
+                            </TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: (s.avgExpectancy ?? 0) > 0 ? NEON_GREEN : (s.avgExpectancy ?? 0) < 0 ? NEON_RED : "#666" }}>
+                              {(s.avgExpectancy ?? 0).toFixed(2)}
+                            </TableCell>
+                            <TableCell className="text-[10px] font-mono text-white/60">
+                              {(s.avgRiskReward ?? 0).toFixed(2)}
                             </TableCell>
                             <TableCell>
                               <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${edgeColor(s.edge)}15`, color: edgeColor(s.edge), borderColor: `${edgeColor(s.edge)}30` }}>
@@ -1628,7 +1797,7 @@ export default function TradingDashboard() {
                             <TableCell className="text-white/40 text-[10px]">{sampleLabel(s.sampleAdequacy)}</TableCell>
                           </TableRow>
                         )) : (
-                          <TableRow><TableCell colSpan={8} className="text-center text-white/30 py-8 text-xs">Cargando...</TableCell></TableRow>
+                          <TableRow><TableCell colSpan={12} className="text-center text-white/30 py-8 text-xs">Cargando...</TableCell></TableRow>
                         )}
                       </TableBody>
                     </Table>

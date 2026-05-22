@@ -1,27 +1,28 @@
+# SignalTrader Pro — Worklog
+
 ---
 Task ID: 1
 Agent: Main
-Task: Fix React hydration error #418 + Build real market engines
+Task: Phase 4 Implementation — Statistical Rigor Engines
 
 Work Log:
-- Fixed formatTime() to use UTC-based formatting instead of toLocaleString("es-ES")
-- Added mounted guard (if !mounted return loading spinner) to prevent hydration mismatch
-- Created src/lib/market-engine.ts - Real Market Data Engine with Binance + TwelveData + GBM fallback
-- Updated src/app/api/market-data/route.ts to use real market engine
-- Updated src/app/api/auto-trader/route.ts to return marketStatus and analysisModes
-- Updated src/app/api/signals/check-pending/route.ts to use real market prices for verification
-- Updated src/lib/auto-trader.ts to use real market engine (Binance/TwelveData) with DB fallback
-- Added Market Status Panel to dashboard (connection status, per-asset sources, latency, API key input)
-- Updated Analysis Mode to include FULL/PARTIAL/FALLBACK/DEMO
-- Created src/lib/learning-engine.ts - Statistical edge discovery with p-values, regime detection, recommendations
-- Created src/app/api/learning/route.ts - Learning Engine API
-- Added Learning tab to dashboard with edge discoveries, best/worst setups, dataset health, recommendations
+- Fixed React hydration error #418 (already resolved with `mounted` state pattern)
+- Updated Prisma schema with 10 new Signal fields and 7 new SetupStats fields
+- Created Bayesian Statistics Engine (bayesian-engine.ts, 26KB)
+- Created Market Regime Engine (regime-engine.ts, 27KB) — 6 regimes
+- Created Feature Engineering module (feature-engineering.ts, 19KB) — 23 features
+- Created Expectancy Engine (expectancy-engine.ts, 14KB) — EV, Kelly, Sharpe, max drawdown
+- Created Quality Filter Engine (quality-filter.ts, 16KB) — 9 quality flags
+- Updated auto-trader v2 with full pipeline: Market → Indicators → Patterns → Session → Regime → Features → Quality → Bayesian → Expectancy → Signal
+- Updated learning-engine with Feature Importance analysis
+- Updated dashboard with Bayesian WR, regime badges, quality indicators, data source icons
+- Fixed pre-existing TypeScript errors in indicators.ts and learning-engine.ts
+- Final build passes with zero errors
 
 Stage Summary:
-- React hydration error #418 fixed with mounted guard + UTC formatting
-- Real Market Data Engine: Binance (crypto) → TwelveData (forex) → GBM Fallback
-- Market Status Panel shows API connections, per-asset sources, latency
-- Learning Engine discovers edges with statistical significance (p-values), regime change detection
-- Auto-trader now uses real market data when available
-- Analysis modes: FULL (real API), PARTIAL (mixed), FALLBACK (simulated), DEMO (no data)
-- Build passes successfully
+- 5 new engine files created (bayesian, regime, feature-engineering, expectancy, quality-filter)
+- Auto-trader pipeline upgraded from 13 to 20+ steps
+- Each signal now saves 23 features, Bayesian stats, EV, quality score
+- Production mode now uses Bayesian WR + Expectancy for filtering (not just raw WR)
+- Dashboard shows WR Bayesiana, IC 95%, p-value, EV, R:R, regime, quality per setup
+- Feature Importance API endpoint: /api/learning?mode=feature-importance

@@ -1,7 +1,7 @@
-// AUTO-TRADER ENGINE
-// Automated signal generation: Market Data → Indicators → Patterns → Session → Signal
-// Runs every X minutes, generates signals, saves to DB, waits for verification
-// The goal is to BUILD THE DATASET - even if signals are bad, data is gold
+// AUTO-TRADER ENGINE v2 — Full Statistical Pipeline
+// Market Data → Indicators → Patterns → Session → Regime → Features → Quality → Bayesian → Expectancy → Signal
+// The goal is to BUILD THE DATASET with maximum feature richness for later analysis
+// "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
 
 import { db } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
@@ -10,6 +10,11 @@ import { computeAllIndicators, type IndicatorSnapshot } from './indicators';
 import { detectPatterns, getBestPattern, type DetectedPattern, type PatternType, PATTERN_DESCRIPTIONS } from './patterns';
 import { detectSession, shouldTradeSession, type SessionInfo, type SessionType } from './sessions';
 import { evaluateSignal } from './signals';
+import { detectRegime, type MarketRegime, type RegimeResult, shouldTradeInRegime, getRegimePatternCompat } from './regime-engine';
+import { computeSignalFeatures, type SignalFeatures } from './feature-engineering';
+import { checkQuality, quickQualityScore, toQualityFeatures, type QualityResult, type QualityFlag } from './quality-filter';
+import { calculateBayesianStats, quickBayesianWR } from './bayesian-engine';
+import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './expectancy-engine';
 
 // === TYPES ===
 
@@ -58,6 +63,17 @@ export interface SignalGenerationResult {
   dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK';
   skipped: boolean;
   skipReason?: string;
+  // === NEW: Phase 4 fields ===
+  regime: MarketRegime | null;
+  regimeConfidence: number;
+  features: SignalFeatures | null;
+  qualityScore: number;
+  qualityFlags: QualityFlag[];
+  qualityBlocked: boolean;
+  bayesianWR: number;
+  expectancy: number;
+  riskReward: number;
+  adjustedWR: number;
 }
 
 // === DEFAULT CONFIG ===
@@ -219,7 +235,8 @@ function calculateIndicatorAlignment(ind: IndicatorSnapshot): number {
   return Math.min(20, Math.max(0, normalized));
 }
 
-// === GENERATE SIGNAL (CORE PIPELINE) ===
+// === GENERATE SIGNAL (CORE PIPELINE v2) ===
+// Full pipeline: Market → Indicators → Patterns → Session → Regime → Features → Quality → Bayesian → Signal
 
 export async function generateAutoSignal(
   asset: string,
@@ -227,6 +244,15 @@ export async function generateAutoSignal(
 ): Promise<SignalGenerationResult> {
   const now = new Date();
   const session = detectSession(now);
+  
+  // Default new fields
+  let regimeResult: RegimeResult | null = null;
+  let features: SignalFeatures | null = null;
+  let qualityResult: QualityResult | null = null;
+  let bayesianWR = 50;
+  let expectancy = 0;
+  let riskReward = 1;
+  let adjustedWR = 50;
   
   // Step 1: Get market data - try REAL market engine first, then fall back to DB
   let candles: any[] = [];
@@ -273,6 +299,9 @@ export async function generateAutoSignal(
       dataSource,
       skipped: true,
       skipReason: 'INSUFFICIENT_DATA',
+      regime: null, regimeConfidence: 0, features: null,
+      qualityScore: 0, qualityFlags: ['INSUFFICIENT_DATA'], qualityBlocked: true,
+      bayesianWR: 50, expectancy: 0, riskReward: 1, adjustedWR: 50,
     };
   }
   
@@ -282,6 +311,17 @@ export async function generateAutoSignal(
   // Step 3: Detect patterns
   const patterns = detectPatterns(candles, indicators);
   const bestPattern = patterns.length > 0 ? patterns.reduce((a, b) => a.confidence > b.confidence ? a : b) : null;
+  
+  // === NEW Step 3.5: Detect market regime ===
+  regimeResult = detectRegime(candles, indicators);
+  const regimeAdvice = shouldTradeInRegime(regimeResult.regime);
+  
+  // Check regime-pattern compatibility
+  const patternCompat = getRegimePatternCompat(regimeResult.regime);
+  const regimeMismatch = bestPattern && patternCompat.avoid.includes(bestPattern.type);
+  
+  // === NEW Step 3.6: Compute signal features (20+ variables) ===
+  features = computeSignalFeatures(candles, indicators, regimeResult, session);
   
   // Step 4: Determine direction
   let direction: 'HIGHER' | 'LOWER' | 'NO_OPERAR' = 'NO_OPERAR';
@@ -308,35 +348,95 @@ export async function generateAutoSignal(
     indicators
   );
   
+  // === NEW Step 5.5: Bayesian adjustment ===
+  if (sampleSize >= 5) {
+    const bayes = calculateBayesianStats(
+      Math.round(historicalWinRate / 100 * sampleSize),
+      Math.round((100 - historicalWinRate) / 100 * sampleSize)
+    );
+    bayesianWR = bayes.bayesianWinRate;
+    adjustedWR = bayes.bayesianWinRate;
+  }
+  
+  // === NEW Step 5.6: Expectancy calculation ===
+  const expectancyResult = estimateExpectancyFromStats(historicalWinRate, sampleSize, setupScore);
+  expectancy = expectancyResult.expectancyPerTrade;
+  riskReward = expectancyResult.riskRewardRatio;
+  
+  // === NEW Step 5.7: Quality filter ===
+  const qualityFeatures = features ? toQualityFeatures(features, asset) : {
+    relativeVolume: indicators.volumeAnalysis.relativeVolume,
+    volumeSpike: indicators.volumeAnalysis.volumeSpike,
+    atr: indicators.atr14,
+    atrPercentile: 50,
+    avgATR: indicators.atr14,
+    candleRange: 0.001,
+    spreadEstimate: 0.001,
+    assetType: (asset.includes('BTC') || asset.includes('ETH') ? 'crypto' : 'forex') as 'forex' | 'crypto',
+  };
+  qualityResult = checkQuality({
+    candles,
+    indicators,
+    regime: { regime: regimeResult.regime, confidence: regimeResult.confidence },
+    sessionInfo: { session: session.session, shouldTrade: session.session !== 'OffHours' },
+    setupStats: sampleSize >= 5 ? { winRate: historicalWinRate, sampleSize } : null,
+    patternType: bestPattern?.type || null,
+    features: qualityFeatures,
+  });
+  
   // Step 6: Session check
-  // DATA COLLECTION MODE: When sample size < 1000, we want to generate signals even in suboptimal sessions
-  // because the dataset is the most valuable asset. Only block OffHours.
   const sessionCheck = shouldTradeSession(session, historicalWinRate, sampleSize);
   const isDataCollectionMode = sampleSize < 1000;
   
   if (!sessionCheck.shouldTrade && session.session === 'OffHours') {
-    // NEVER trade during off-hours regardless of mode
     direction = 'NO_OPERAR';
     reason = sessionCheck.reason;
     confidence = 0;
   } else if (!sessionCheck.shouldTrade && !isDataCollectionMode) {
-    // In production mode (1000+ signals), respect session warnings
     direction = 'NO_OPERAR';
     reason = sessionCheck.reason;
     confidence = 0;
   } else if (!sessionCheck.shouldTrade && isDataCollectionMode) {
-    // In data collection mode, generate signal anyway but flag it
-    reason += ' [MODO RECOLECCIÓN: Operando en sesión subóptima para recolectar datos]';
+    reason += ' [MODO RECOLECCIÓN: Sesión subóptima]';
+  }
+  
+  // === NEW Step 6.5: Quality block check ===
+  // In data collection mode, we still generate signals even with quality issues
+  // But we flag them. In production mode, quality blocks are enforced.
+  if (qualityResult.isBlocked && !isDataCollectionMode) {
+    direction = 'NO_OPERAR';
+    reason = qualityResult.blockReason || 'Señal bloqueada por filtro de calidad';
+    confidence = 0;
+  } else if (qualityResult.isBlocked && isDataCollectionMode) {
+    reason += ` [MODO RECOLECCIÓN: Calidad baja (${qualityResult.score}/100) pero generando para dataset]`;
+  }
+  
+  // === NEW Step 6.6: Regime mismatch warning ===
+  if (regimeMismatch && !isDataCollectionMode) {
+    // In production mode, regime mismatch → NO_OPERAR
+    direction = 'NO_OPERAR';
+    reason = `Patrón ${bestPattern?.type} no compatible con régimen ${regimeResult.regime}. ${regimeAdvice.reason}`;
+    confidence = Math.min(confidence, 20);
+  } else if (regimeMismatch && isDataCollectionMode) {
+    reason += ` [RÉGimen: ${regimeResult.regime} - Patrón no óptimo pero generando para dataset]`;
   }
   
   // Step 7: Adjust confidence with session and setup score
   confidence = Math.min(100, Math.max(0, confidence + sessionCheck.adjustedConfidence));
   
+  // Adjust confidence with regime
+  if (regimeResult.regime === 'TRENDING' && bestPattern?.type === 'trend_continuation') {
+    confidence = Math.min(100, confidence + 5);
+  } else if (regimeResult.regime === 'RANGING' && (bestPattern?.type === 'reversal' || bestPattern?.type === 'fakeout')) {
+    confidence = Math.min(100, confidence + 5);
+  } else if (regimeResult.regime === 'LOW_VOL') {
+    confidence = Math.max(0, confidence - 10);
+  } else if (regimeResult.regime === 'NEWS') {
+    confidence = Math.max(0, confidence - 5);
+  }
+  
   // Step 8: Final NO_OPERAR check
-  // DATA COLLECTION MODE: When sample size < 1000, we lower the threshold to generate more signals
-  // "El dataset es el activo más valioso" - generate signals even if they're bad
   if (isDataCollectionMode) {
-    // In data collection mode: only NO_OPERAR if we truly have no direction
     if (direction === 'NO_OPERAR' || (!bestPattern && confidence < 15)) {
       const noOperarReasons: string[] = [];
       if (!bestPattern) noOperarReasons.push('Sin patrón detectado');
@@ -344,24 +444,24 @@ export async function generateAutoSignal(
       direction = 'NO_OPERAR';
       reason = `NO OPERAR [MODO RECOLECCIÓN]: ${noOperarReasons.join('. ')}. Sin suficiente señal para determinar dirección.`;
     }
-    // If we have ANY direction from patterns or indicators, generate the signal
-    // Tag it with data collection note
     if (direction !== 'NO_OPERAR' && confidence < 40) {
       reason += ` [MODO RECOLECCIÓN: Confianza baja (${confidence.toFixed(0)}%) pero generando señal para construir dataset]`;
     }
   } else {
-    // Production mode: stricter filtering
-    if (confidence < 40 || setupScore < 25) {
+    // Production mode: stricter filtering using Bayesian WR + Expectancy
+    if (confidence < 40 || setupScore < 25 || (bayesianWR < 48 && sampleSize >= 30) || (expectancy < 0 && sampleSize >= 50)) {
       const noOperarReasons: string[] = [];
       if (confidence < 40) noOperarReasons.push(`Confianza baja: ${confidence.toFixed(0)}%`);
       if (setupScore < 25) noOperarReasons.push(`Setup score bajo: ${setupScore.toFixed(0)}`);
+      if (bayesianWR < 48 && sampleSize >= 30) noOperarReasons.push(`WR bayesiana baja: ${bayesianWR.toFixed(1)}%`);
+      if (expectancy < 0 && sampleSize >= 50) noOperarReasons.push(`EV negativo: ${expectancy.toFixed(2)}R`);
       direction = 'NO_OPERAR';
       reason = `NO OPERAR: ${noOperarReasons.join('. ')}. Es mejor no operar que operar sin edge.`;
       confidence = Math.max(confidence, setupScore * 0.3);
     }
   }
   
-  // Step 9: Determine analysis mode based on data source quality
+  // Step 9: Determine analysis mode
   const dataAvailability: Record<string, boolean> = {
     candles: candles.length >= 50,
     indicators: indicators.rsi14 !== null,
@@ -369,22 +469,22 @@ export async function generateAutoSignal(
     session: true,
     volume: indicators.volumeAnalysis.avgVolume20 > 0,
     realMarketData: dataSource === 'BINANCE' || dataSource === 'TWELVEDATA',
+    regime: regimeResult.regime !== 'RANGING' || regimeResult.confidence > 30,
+    quality: qualityResult.score >= 50,
   };
   
   const availableCount = Object.values(dataAvailability).filter(Boolean).length;
   
-  // Analysis mode is primarily determined by data source
-  // Real API data = FULL, simulated = FALLBACK
   let analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK' | 'DEMO';
   if (dataSource === 'BINANCE' || dataSource === 'TWELVEDATA') {
-    analysisMode = availableCount >= 4 ? 'FULL' : 'PARTIAL';
+    analysisMode = availableCount >= 6 ? 'FULL' : 'PARTIAL';
   } else if (dataSource === 'FALLBACK') {
     analysisMode = 'FALLBACK';
   } else {
     analysisMode = 'DEMO';
   }
   
-  // Step 10: Determine statistical reliability
+  // Step 10: Statistical reliability
   const statisticalReliability = 
     sampleSize >= 500 ? 'HIGH' : 
     sampleSize >= 100 ? 'MEDIUM' : 
@@ -395,9 +495,34 @@ export async function generateAutoSignal(
   
   // Step 12: Determine expiration
   const tfMinutes = { 'M1': 1, 'M5': 5, 'M15': 15, 'M30': 30, 'H1': 60 }[timeframe] || 5;
-  const expirationMinutes = tfMinutes * 2; // 2 candles = expiration
+  const expirationMinutes = tfMinutes * 2;
   
-  // Step 13: Save signal to database
+  // === NEW Step 12.5: Calculate risk/reward from pattern key levels ===
+  let calculatedRR = riskReward;
+  if (bestPattern?.keyLevels) {
+    const entry = bestPattern.keyLevels.entry;
+    const sl = bestPattern.keyLevels.stopLoss;
+    const tp = bestPattern.keyLevels.takeProfit;
+    const risk = Math.abs(entry - sl);
+    const reward = Math.abs(tp - entry);
+    if (risk > 0) calculatedRR = reward / risk;
+  }
+  
+  // === NEW Step 12.6: Bayesian confidence interval ===
+  let confidenceInterval: { lower: number; upper: number } | null = null;
+  let pValue = 1;
+  let sampleVariance = 0;
+  if (sampleSize >= 5) {
+    const bayes = calculateBayesianStats(
+      Math.round(historicalWinRate / 100 * sampleSize),
+      Math.round((100 - historicalWinRate) / 100 * sampleSize)
+    );
+    confidenceInterval = bayes.confidenceInterval;
+    pValue = bayes.pValue;
+    sampleVariance = bayes.sampleVariance;
+  }
+  
+  // Step 13: Save signal to database with ALL new fields
   const signalData = {
     asset,
     timeframe,
@@ -431,6 +556,17 @@ export async function generateAutoSignal(
     volumeJson: JSON.stringify(indicators.volumeAnalysis),
     noOperarReason: direction === 'NO_OPERAR' ? reason : null,
     verificationMethod: 'SIMULATED',
+    // === NEW Phase 4 fields ===
+    marketRegime: regimeResult.regime,
+    featuresJson: JSON.stringify(features),
+    expectancy,
+    riskReward: calculatedRR,
+    adjustedWinRate: adjustedWR,
+    confidenceInterval: confidenceInterval ? JSON.stringify(confidenceInterval) : null,
+    pValue,
+    sampleVariance,
+    qualityScore: qualityResult.score,
+    qualityFlags: JSON.stringify(qualityResult.flags),
   };
   
   const signal = await db.signal.create({ data: signalData });
@@ -450,6 +586,17 @@ export async function generateAutoSignal(
     dataSource,
     skipped: direction === 'NO_OPERAR',
     skipReason: direction === 'NO_OPERAR' ? reason : undefined,
+    // New fields
+    regime: regimeResult.regime,
+    regimeConfidence: regimeResult.confidence,
+    features,
+    qualityScore: qualityResult.score,
+    qualityFlags: qualityResult.flags,
+    qualityBlocked: qualityResult.isBlocked,
+    bayesianWR,
+    expectancy,
+    riskReward: calculatedRR,
+    adjustedWR,
   };
 }
 
@@ -527,6 +674,9 @@ export async function updateSetupStats(signal: {
   result: string;
   confidence: number;
   setupScore: number | null;
+  expectancy?: number | null;
+  riskReward?: number | null;
+  qualityScore?: number | null;
 }): Promise<void> {
   if (!signal.result || signal.result === 'NO_OPERAR' || signal.result === 'DRAW') return;
   
@@ -556,6 +706,20 @@ export async function updateSetupStats(signal: {
         ? (existing.avgSetupScore * existing.totalSignals + signal.setupScore) / newTotal 
         : existing.avgSetupScore;
       
+      // === NEW: Bayesian stats update ===
+      const bayes = calculateBayesianStats(newWins, newLosses);
+      
+      // Running average for expectancy, risk/reward, quality
+      const newAvgExpectancy = signal.expectancy != null
+        ? (existing.avgExpectancy * existing.totalSignals + signal.expectancy) / newTotal
+        : existing.avgExpectancy;
+      const newAvgRR = signal.riskReward != null
+        ? (existing.avgRiskReward * existing.totalSignals + signal.riskReward) / newTotal
+        : existing.avgRiskReward;
+      const newAvgQuality = signal.qualityScore != null
+        ? (existing.avgQualityScore * existing.totalSignals + signal.qualityScore) / newTotal
+        : existing.avgQualityScore;
+      
       await db.setupStats.update({
         where: { id: existing.id },
         data: {
@@ -565,9 +729,25 @@ export async function updateSetupStats(signal: {
           winRate: newWinRate,
           avgConfidence: newAvgConf,
           avgSetupScore: newAvgSetup,
+          // Bayesian fields
+          bayesianWinRate: bayes.bayesianWinRate,
+          confidenceIntervalLower: bayes.confidenceInterval.lower,
+          confidenceIntervalUpper: bayes.confidenceInterval.upper,
+          pValue: bayes.pValue,
+          sampleVariance: bayes.sampleVariance,
+          // Expectancy fields
+          avgExpectancy: newAvgExpectancy,
+          avgRiskReward: newAvgRR,
+          avgQualityScore: newAvgQuality,
         },
       });
     } else {
+      // Create new stats entry with Bayesian fields
+      const bayes = calculateBayesianStats(
+        signal.result === 'WIN' ? 1 : 0,
+        signal.result === 'LOSS' ? 1 : 0
+      );
+      
       await db.setupStats.create({
         data: {
           patternType,
@@ -580,6 +760,16 @@ export async function updateSetupStats(signal: {
           winRate: signal.result === 'WIN' ? 100 : 0,
           avgConfidence: signal.confidence,
           avgSetupScore: signal.setupScore || 0,
+          // Bayesian fields
+          bayesianWinRate: bayes.bayesianWinRate,
+          confidenceIntervalLower: bayes.confidenceInterval.lower,
+          confidenceIntervalUpper: bayes.confidenceInterval.upper,
+          pValue: bayes.pValue,
+          sampleVariance: bayes.sampleVariance,
+          // Expectancy fields
+          avgExpectancy: signal.expectancy || 0,
+          avgRiskReward: signal.riskReward || 0,
+          avgQualityScore: signal.qualityScore || 0,
         },
       });
     }
@@ -709,6 +899,14 @@ export async function getSetupScores(): Promise<Array<{
   avgConfidence: number;
   edge: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'UNKNOWN';
   sampleAdequacy: 'INSUFFICIENT' | 'LOW' | 'MEDIUM' | 'HIGH';
+  // === NEW Phase 4 fields ===
+  bayesianWinRate: number;
+  confidenceIntervalLower: number;
+  confidenceIntervalUpper: number;
+  pValue: number;
+  avgExpectancy: number;
+  avgRiskReward: number;
+  avgQualityScore: number;
 }>> {
   const stats = await db.setupStats.findMany({
     orderBy: { winRate: 'desc' },
@@ -716,10 +914,12 @@ export async function getSetupScores(): Promise<Array<{
   
   return stats.map(s => {
     const decisive = s.wins + s.losses;
+    // Use Bayesian WR for edge determination when available
+    const wrForEdge = s.bayesianWinRate > 0 ? s.bayesianWinRate : s.winRate;
     const edge: 'POSITIVE' | 'NEGATIVE' | 'NEUTRAL' | 'UNKNOWN' = 
       decisive < 10 ? 'UNKNOWN' :
-      s.winRate > 55 ? 'POSITIVE' :
-      s.winRate < 45 ? 'NEGATIVE' : 'NEUTRAL';
+      wrForEdge > 55 ? 'POSITIVE' :
+      wrForEdge < 45 ? 'NEGATIVE' : 'NEUTRAL';
     
     const sampleAdequacy: 'INSUFFICIENT' | 'LOW' | 'MEDIUM' | 'HIGH' = 
       s.totalSignals < 30 ? 'INSUFFICIENT' :
@@ -738,6 +938,14 @@ export async function getSetupScores(): Promise<Array<{
       avgConfidence: Math.round(s.avgConfidence * 10) / 10,
       edge,
       sampleAdequacy,
+      // New fields
+      bayesianWinRate: Math.round(s.bayesianWinRate * 10) / 10,
+      confidenceIntervalLower: Math.round(s.confidenceIntervalLower * 10) / 10,
+      confidenceIntervalUpper: Math.round(s.confidenceIntervalUpper * 10) / 10,
+      pValue: Math.round(s.pValue * 10000) / 10000,
+      avgExpectancy: Math.round(s.avgExpectancy * 1000) / 1000,
+      avgRiskReward: Math.round(s.avgRiskReward * 10) / 10,
+      avgQualityScore: Math.round(s.avgQualityScore * 10) / 10,
     };
   });
 }
