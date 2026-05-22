@@ -13,9 +13,10 @@ export async function GET() {
     TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN
       ? `SET (${process.env.TURSO_AUTH_TOKEN.substring(0, 10)}...)`
       : "NOT SET",
+    TWELVEDATA_API_KEY: process.env.TWELVEDATA_API_KEY ? "SET (hidden)" : "NOT SET",
     NODE_ENV: process.env.NODE_ENV || "undefined",
-    VERCEL: process.env.VERCEL || "not set",
-    VERCEL_REGION: process.env.VERCEL_REGION || "not set",
+    VERCEL: process.env.VERCEL || "not on Vercel",
+    VERCEL_REGION: process.env.VERCEL_REGION || "N/A",
   };
 
   // 2. Test raw Turso connection via @libsql/client
@@ -41,14 +42,12 @@ export async function GET() {
       const tables = await libsql.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
       );
-      diagnostics.tursoTables = tables.rows.map((r) => r.name);
+      diagnostics.tursoTables = tables.rows.map((r) => (r as Record<string, unknown>).name);
 
       // Check Signal count
       try {
-        const countResult = await libsql.execute(
-          "SELECT COUNT(*) as count FROM Signal"
-        );
-        diagnostics.tursoSignalCount = countResult.rows[0].count;
+        const countResult = await libsql.execute("SELECT COUNT(*) as count FROM Signal");
+        diagnostics.tursoSignalCount = (countResult.rows[0] as Record<string, unknown>).count;
       } catch {
         diagnostics.tursoSignalCount = "ERROR (table may not exist)";
       }
@@ -64,41 +63,10 @@ export async function GET() {
     diagnostics.tursoRawConnection = "SKIPPED (no Turso credentials)";
   }
 
-  // 3. Test Prisma Client with PrismaLibSQL adapter
-  if (tursoUrl && tursoToken) {
-    try {
-      const { PrismaClient } = await import("@prisma/client");
-      const { PrismaLibSQL } = await import("@prisma/adapter-libsql");
-
-      const adapter = new PrismaLibSQL({
-        url: tursoUrl,
-        authToken: tursoToken,
-      });
-      const prisma = new PrismaClient({ adapter });
-
-      const prismaStart = Date.now();
-      const signalCount = await prisma.signal.count();
-      const prismaLatency = Date.now() - prismaStart;
-
-      diagnostics.prismaWithAdapter = {
-        ok: true,
-        signalCount,
-        latency: `${prismaLatency}ms`,
-      };
-
-      await prisma.$disconnect();
-    } catch (adapterErr: unknown) {
-      diagnostics.prismaWithAdapter = {
-        ok: false,
-        error: adapterErr instanceof Error ? adapterErr.message : String(adapterErr),
-        stack: adapterErr instanceof Error ? adapterErr.stack : undefined,
-      };
-    }
-  } else {
-    diagnostics.prismaWithAdapter = "SKIPPED (no Turso credentials)";
-  }
-
-  // 4. Test the db module (what the app actually uses)
+  // 3. Test the db module (what the app actually uses - uses static imports)
+  // NOTE: We do NOT test PrismaLibSQL via dynamic import because Vercel's
+  // Turbopack minification breaks dynamic imports of this package.
+  // The db module uses static imports which work correctly.
   try {
     const { db, getDbMode, testConnection } = await import("@/lib/db");
     diagnostics.dbMode = getDbMode();
@@ -110,7 +78,7 @@ export async function GET() {
     };
   }
 
-  // 5. Test Market Engine
+  // 4. Test Market Engine
   try {
     const { getEngineStatus, checkApiHealth } = await import("@/lib/market-engine");
     diagnostics.marketEngine = getEngineStatus();
@@ -118,12 +86,21 @@ export async function GET() {
     // Quick health check (with timeout)
     const healthPromise = checkApiHealth();
     const timeoutPromise = new Promise<{ timeout: true }>((resolve) =>
-      setTimeout(() => resolve({ timeout: true }), 5000)
+      setTimeout(() => resolve({ timeout: true }), 8000)
     );
     const healthResult = await Promise.race([healthPromise, timeoutPromise]);
     diagnostics.marketHealth = healthResult;
   } catch (engineErr: unknown) {
     diagnostics.marketEngineError = engineErr instanceof Error ? engineErr.message : String(engineErr);
+  }
+
+  // 5. Test real price fetch
+  try {
+    const { getLatestPrice } = await import("@/lib/market-engine");
+    const btcPrice = await getLatestPrice("BTC/USD");
+    diagnostics.livePrice = { asset: "BTC/USD", ...btcPrice };
+  } catch (priceErr: unknown) {
+    diagnostics.livePriceError = priceErr instanceof Error ? priceErr.message : String(priceErr);
   }
 
   diagnostics.totalTime = `${Date.now() - startTime}ms`;

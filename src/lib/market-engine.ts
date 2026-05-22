@@ -1,6 +1,8 @@
-// REAL MARKET DATA ENGINE - Multi-source with Binance + TwelveData + Fallback
-// Replaces simulated GBM candle generation with real API data where available.
-// Architecture: Binance (crypto) → TwelveData (forex) → GBM Fallback
+// REAL MARKET DATA ENGINE - Multi-source with TwelveData + Binance Proxy + Fallback
+// Architecture: TwelveData (all assets) → Binance Proxy (crypto) → GBM Fallback
+//
+// IMPORTANT: In Vercel serverless, module-level state is lost between requests.
+// All API keys are read from environment variables on each request.
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -28,16 +30,25 @@ export interface MarketEngineStatus {
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const BINANCE_BASE = 'https://api.binance.com';
 const TWELVEDATA_BASE = 'https://api.twelvedata.com';
+
+// Binance API alternatives - direct API is often blocked from cloud providers (AWS/Vercel)
+// Try multiple endpoints in order
+const BINANCE_ENDPOINTS = [
+  'https://api.binance.us/api/v3',      // US endpoint (less restrictive)
+  'https://api1.binance.com/api/v3',     // Alternative endpoints
+  'https://api2.binance.com/api/v3',
+  'https://api3.binance.com/api/v3',
+  'https://data-api.binance.vision/api/v3', // Public data API
+];
 
 // Map our asset names to Binance symbols
 const BINANCE_SYMBOLS: Record<string, string> = {
   'BTC/USD': 'BTCUSDT',
   'ETH/USD': 'ETHUSDT',
-  'EUR/USD': 'EURUSDT',  // Binance may not have this, will fallback
-  'GBP/USD': 'GBPUSDT',  // Binance may not have this, will fallback
-  'USD/JPY': 'USDJPY',   // Binance may not have this, will fallback
+  'EUR/USD': 'EURUSDT',
+  'GBP/USD': 'GBPUSDT',
+  'USD/JPY': 'USDJPY',
 };
 
 const TWELVEDATA_SYMBOLS: Record<string, { symbol: string; market: string }> = {
@@ -74,7 +85,17 @@ const ASSET_CONFIGS: Record<string, { basePrice: number; volatility: number; dri
   'ETH/USD': { basePrice: 3500, volatility: 50, drift: 0.5 },
 };
 
-// ─── Engine State ─────────────────────────────────────────────────────────────
+// ─── Engine State (per-request, rebuilt each time in serverless) ──────────────
+
+// Cache with TTL for serverless - survives within a single request
+interface PriceCache {
+  price: number;
+  source: string;
+  timestamp: number;
+}
+
+const priceCache: Record<string, PriceCache> = {};
+const CACHE_TTL = 30_000; // 30 seconds
 
 let engineStatus: MarketEngineStatus = {
   connected: false,
@@ -88,63 +109,86 @@ let engineStatus: MarketEngineStatus = {
   twelveDataAvailable: false,
 };
 
-let twelveDataApiKey: string | null = null;
+// ─── API Key Helpers (reads from env vars each time for serverless) ───────────
 
-// ─── Binance API ──────────────────────────────────────────────────────────────
+function getTwelveDataApiKey(): string | null {
+  return process.env.TWELVEDATA_API_KEY || null;
+}
+
+export function setTwelveDataApiKey(key: string) {
+  // For runtime API key setting (also updates env for persistence)
+  process.env.TWELVEDATA_API_KEY = key;
+}
+
+export function getTwelveDataApiKeyStatus(): boolean {
+  return !!getTwelveDataApiKey();
+}
+
+// ─── Binance API (with multiple endpoint fallback) ───────────────────────────
 
 async function fetchBinanceKlines(
   symbol: string,
   interval: string,
   limit: number = 100
 ): Promise<MarketCandle[] | null> {
-  const start = Date.now();
-  try {
-    const url = `${BINANCE_BASE}/api/v3/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(10000),
-      headers: { Accept: 'application/json' },
-    });
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    const start = Date.now();
+    try {
+      const url = `${baseUrl}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(8000),
+        headers: { Accept: 'application/json' },
+      });
 
-    if (!res.ok) return null;
+      if (!res.ok) continue; // Try next endpoint
 
-    const data = await res.json();
+      const data = await res.json();
 
-    if (!Array.isArray(data) || data.length === 0) return null;
+      if (!Array.isArray(data) || data.length === 0) continue;
 
-    const latency = Date.now() - start;
-    engineStatus.latency[symbol] = latency;
-    engineStatus.binanceAvailable = true;
+      const latency = Date.now() - start;
+      engineStatus.latency[symbol] = latency;
+      engineStatus.binanceAvailable = true;
 
-    return data.map((k: number[]) => ({
-      timestamp: k[0],
-      open: parseFloat(String(k[1])),
-      high: parseFloat(String(k[2])),
-      low: parseFloat(String(k[3])),
-      close: parseFloat(String(k[4])),
-      volume: parseFloat(String(k[5])),
-      source: 'BINANCE' as const,
-    }));
-  } catch {
-    engineStatus.binanceAvailable = false;
-    return null;
+      return data.map((k: number[]) => ({
+        timestamp: k[0],
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
+        source: 'BINANCE' as const,
+      }));
+    } catch {
+      continue; // Try next endpoint
+    }
   }
+
+  engineStatus.binanceAvailable = false;
+  return null;
 }
 
 async function fetchBinancePrice(symbol: string): Promise<number | null> {
-  try {
-    const url = `${BINANCE_BASE}/api/v3/ticker/price?symbol=${symbol}`;
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(5000),
-      headers: { Accept: 'application/json' },
-    });
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const url = `${baseUrl}/ticker/price?symbol=${symbol}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(5000),
+        headers: { Accept: 'application/json' },
+      });
 
-    if (!res.ok) return null;
+      if (!res.ok) continue;
 
-    const data = await res.json();
-    return parseFloat(data.price);
-  } catch {
-    return null;
+      const data = await res.json();
+      if (data.price) {
+        engineStatus.binanceAvailable = true;
+        return parseFloat(data.price);
+      }
+    } catch {
+      continue;
+    }
   }
+  return null;
 }
 
 // ─── TwelveData API ──────────────────────────────────────────────────────────
@@ -154,7 +198,8 @@ async function fetchTwelveDataCandles(
   interval: string,
   outputsize: number = 100
 ): Promise<MarketCandle[] | null> {
-  if (!twelveDataApiKey) return null;
+  const apiKey = getTwelveDataApiKey();
+  if (!apiKey) return null;
 
   const config = TWELVEDATA_SYMBOLS[asset];
   if (!config) return null;
@@ -165,7 +210,7 @@ async function fetchTwelveDataCandles(
       symbol: config.symbol,
       interval: TWELVEDATA_INTERVALS[interval] || '5min',
       outputsize: outputsize.toString(),
-      apikey: twelveDataApiKey,
+      apikey: apiKey,
     });
 
     if (config.market === 'forex') {
@@ -182,7 +227,10 @@ async function fetchTwelveDataCandles(
 
     const data = await res.json();
 
-    if (data.status === 'error') return null;
+    if (data.status === 'error') {
+      console.error('[MarketEngine] TwelveData error:', data.message);
+      return null;
+    }
 
     const values = data.values;
     if (!Array.isArray(values) || values.length === 0) return null;
@@ -201,14 +249,16 @@ async function fetchTwelveDataCandles(
       volume: parseInt(v.volume || '0'),
       source: 'TWELVEDATA' as const,
     }));
-  } catch {
+  } catch (err) {
     engineStatus.twelveDataAvailable = false;
+    console.error('[MarketEngine] TwelveData fetch error:', err);
     return null;
   }
 }
 
 async function fetchTwelveDataPrice(asset: string): Promise<number | null> {
-  if (!twelveDataApiKey) return null;
+  const apiKey = getTwelveDataApiKey();
+  if (!apiKey) return null;
 
   const config = TWELVEDATA_SYMBOLS[asset];
   if (!config) return null;
@@ -216,7 +266,7 @@ async function fetchTwelveDataPrice(asset: string): Promise<number | null> {
   try {
     const params = new URLSearchParams({
       symbol: config.symbol,
-      apikey: twelveDataApiKey,
+      apikey: apiKey,
     });
     if (config.market === 'forex') params.set('market', 'forex');
 
@@ -226,7 +276,11 @@ async function fetchTwelveDataPrice(asset: string): Promise<number | null> {
     if (!res.ok) return null;
 
     const data = await res.json();
-    return parseFloat(data.price);
+    if (data.price) {
+      engineStatus.twelveDataAvailable = true;
+      return parseFloat(data.price);
+    }
+    return null;
   } catch {
     return null;
   }
@@ -252,7 +306,9 @@ function generateGBMCandles(
   };
   const tfMs = (tfMinutes[timeframe] || 5) * 60 * 1000;
 
-  let price = config.basePrice;
+  // Use cached price if available, otherwise base price
+  const cachedPrice = priceCache[asset]?.price;
+  let price = cachedPrice || config.basePrice;
   const now = Date.now();
 
   // Session-aware volatility
@@ -296,14 +352,6 @@ function generateGBMCandles(
 
 // ─── Main Engine Functions ────────────────────────────────────────────────────
 
-export function setTwelveDataApiKey(key: string) {
-  twelveDataApiKey = key;
-}
-
-export function getTwelveDataApiKeyStatus(): boolean {
-  return twelveDataApiKey !== null && twelveDataApiKey.length > 0;
-}
-
 export async function getCandles(
   asset: string,
   timeframe: string = 'M5',
@@ -311,7 +359,7 @@ export async function getCandles(
 ): Promise<{ candles: MarketCandle[]; source: string }> {
   const binanceSymbol = BINANCE_SYMBOLS[asset];
 
-  // Try Binance first (for crypto)
+  // 1. Try Binance first (for crypto)
   if (binanceSymbol) {
     const binanceInterval = BINANCE_INTERVALS[timeframe] || '5m';
     const klines = await fetchBinanceKlines(binanceSymbol, binanceInterval, count);
@@ -320,21 +368,37 @@ export async function getCandles(
       engineStatus.lastPrice[asset] = klines[klines.length - 1].close;
       engineStatus.lastUpdate[asset] = new Date().toISOString();
       engineStatus.connected = true;
+
+      // Update price cache
+      priceCache[asset] = {
+        price: klines[klines.length - 1].close,
+        source: 'BINANCE',
+        timestamp: Date.now(),
+      };
+
       return { candles: klines, source: 'BINANCE' };
     }
   }
 
-  // Try TwelveData (for forex)
+  // 2. Try TwelveData (for forex + crypto)
   const twelveDataCandles = await fetchTwelveDataCandles(asset, timeframe, count);
   if (twelveDataCandles && twelveDataCandles.length > 0) {
     engineStatus.sources[asset] = 'TWELVEDATA';
     engineStatus.lastPrice[asset] = twelveDataCandles[twelveDataCandles.length - 1].close;
     engineStatus.lastUpdate[asset] = new Date().toISOString();
     engineStatus.connected = true;
+
+    // Update price cache
+    priceCache[asset] = {
+      price: twelveDataCandles[twelveDataCandles.length - 1].close,
+      source: 'TWELVEDATA',
+      timestamp: Date.now(),
+    };
+
     return { candles: twelveDataCandles, source: 'TWELVEDATA' };
   }
 
-  // Fall back to GBM simulation
+  // 3. Fall back to GBM simulation (use cached price if available)
   const fallbackCandles = generateGBMCandles(asset, count, timeframe);
   engineStatus.sources[asset] = 'FALLBACK';
   engineStatus.lastPrice[asset] =
@@ -359,10 +423,17 @@ export async function getCandles(
 export async function getLatestPrice(
   asset: string
 ): Promise<{ price: number; source: string; latency: number }> {
+  // Check cache first
+  const cached = priceCache[asset];
+  if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+    const latency = Date.now() - cached.timestamp;
+    return { price: cached.price, source: cached.source, latency };
+  }
+
   const start = Date.now();
   const binanceSymbol = BINANCE_SYMBOLS[asset];
 
-  // Try Binance
+  // 1. Try Binance
   if (binanceSymbol) {
     const price = await fetchBinancePrice(binanceSymbol);
     if (price !== null) {
@@ -372,11 +443,13 @@ export async function getLatestPrice(
       engineStatus.latency[asset] = latency;
       engineStatus.sources[asset] = 'BINANCE';
       engineStatus.connected = true;
+
+      priceCache[asset] = { price, source: 'BINANCE', timestamp: Date.now() };
       return { price, source: 'BINANCE', latency };
     }
   }
 
-  // Try TwelveData
+  // 2. Try TwelveData
   const tdPrice = await fetchTwelveDataPrice(asset);
   if (tdPrice !== null) {
     const latency = Date.now() - start;
@@ -385,12 +458,17 @@ export async function getLatestPrice(
     engineStatus.latency[asset] = latency;
     engineStatus.sources[asset] = 'TWELVEDATA';
     engineStatus.connected = true;
+
+    priceCache[asset] = { price: tdPrice, source: 'TWELVEDATA', timestamp: Date.now() };
     return { price: tdPrice, source: 'TWELVEDATA', latency };
   }
 
-  // Fallback to last known or generated price
+  // 3. Fallback to last known or base price
   const fallbackPrice =
-    engineStatus.lastPrice[asset] || ASSET_CONFIGS[asset]?.basePrice || 0;
+    engineStatus.lastPrice[asset] ||
+    priceCache[asset]?.price ||
+    ASSET_CONFIGS[asset]?.basePrice ||
+    0;
   const latency = Date.now() - start;
   engineStatus.sources[asset] = 'FALLBACK';
   return { price: fallbackPrice, source: 'FALLBACK', latency };
@@ -435,25 +513,31 @@ export async function checkApiHealth(): Promise<{
     latency: { binance: -1, twelveData: -1 },
   };
 
-  // Check Binance
-  try {
-    const start = Date.now();
-    const res = await fetch(`${BINANCE_BASE}/api/v3/ping`, {
-      signal: AbortSignal.timeout(5000),
-    });
-    results.binance = res.ok;
-    results.latency.binance = Date.now() - start;
-    engineStatus.binanceAvailable = results.binance;
-  } catch {
-    results.binance = false;
+  // Check Binance (try multiple endpoints)
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const start = Date.now();
+      const res = await fetch(`${baseUrl}/ping`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (res.ok) {
+        results.binance = true;
+        results.latency.binance = Date.now() - start;
+        engineStatus.binanceAvailable = true;
+        break; // Found a working endpoint
+      }
+    } catch {
+      continue;
+    }
   }
 
-  // Check TwelveData (only if API key is set)
-  if (twelveDataApiKey) {
+  // Check TwelveData (only if API key is available)
+  const apiKey = getTwelveDataApiKey();
+  if (apiKey) {
     try {
       const start = Date.now();
       const res = await fetch(
-        `${TWELVEDATA_BASE}/time_series?symbol=EUR/USD&interval=1min&outputsize=1&apikey=${twelveDataApiKey}`,
+        `${TWELVEDATA_BASE}/time_series?symbol=EUR/USD&interval=1min&outputsize=1&apikey=${apiKey}`,
         { signal: AbortSignal.timeout(10000) }
       );
       const data = await res.json();
