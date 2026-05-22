@@ -4,7 +4,7 @@
 // 3. Seeds market data candles for analysis
 
 import { NextRequest, NextResponse } from 'next/server';
-import { db } from '@/lib/db';
+import { db, runAutoMigration } from '@/lib/db';
 import { evaluateSignal, checkAlerts } from '@/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus } from '@/lib/market-engine';
 import { getLatestPrice as getDBLatestPrice, seedCandlesFromEngine } from '@/lib/market-data';
@@ -19,6 +19,21 @@ export async function GET(request: NextRequest) {
 
   // Verify this is a legitimate cron call (Vercel sends cron query param)
   const isCron = request.nextUrl.searchParams.get('cron');
+
+  // ============================================================
+  // PHASE 0: Auto-migrate — ensure DB has all required columns
+  // ============================================================
+  try {
+    const migrationResult = await runAutoMigration();
+    if (migrationResult.applied.length > 0) {
+      results.push(`Migración: ${migrationResult.applied.length} columnas agregadas (${migrationResult.applied.join(', ')})`);
+    }
+    if (migrationResult.errors.length > 0) {
+      errors.push(`Migración: ${migrationResult.errors.join('; ')}`);
+    }
+  } catch (error: any) {
+    errors.push(`Migración: ${error.message}`);
+  }
 
   // ============================================================
   // PHASE 1: Verify expired pending signals with REAL prices

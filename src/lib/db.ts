@@ -86,3 +86,66 @@ export async function testConnection(): Promise<{
     }
   }
 }
+
+// ─── AUTO-MIGRATION ──────────────────────────────────────────────────────────
+// Adds missing columns to Signal table for MTF (Phase 5) and other new fields.
+// Safe to run multiple times — ignores "duplicate column" errors.
+
+const MTF_MIGRATIONS: Array<{ column: string; sql: string }> = [
+  { column: 'mtfConfluence', sql: 'ALTER TABLE Signal ADD COLUMN mtfConfluence REAL' },
+  { column: 'mtfDirection',  sql: 'ALTER TABLE Signal ADD COLUMN mtfDirection TEXT' },
+  { column: 'h1Filter',      sql: 'ALTER TABLE Signal ADD COLUMN h1Filter TEXT' },
+  { column: 'h4Filter',      sql: 'ALTER TABLE Signal ADD COLUMN h4Filter TEXT' },
+  { column: 'entryQuality',  sql: 'ALTER TABLE Signal ADD COLUMN entryQuality TEXT' },
+  { column: 'mtfJson',       sql: 'ALTER TABLE Signal ADD COLUMN mtfJson TEXT' },
+]
+
+export async function runAutoMigration(): Promise<{ applied: string[]; skipped: string[]; errors: string[] }> {
+  const applied: string[] = []
+  const skipped: string[] = []
+  const errors: string[] = []
+
+  // First, check which columns already exist
+  let existingColumns: Set<string> = new Set()
+  try {
+    const result = await db.$queryRaw<Array<{ name: string }>>`PRAGMA table_info(Signal)`
+    existingColumns = new Set(result.map(r => r.name))
+  } catch (err) {
+    // If PRAGMA fails (e.g., Turso HTTP doesn't support PRAGMA), try a different approach
+    // We'll try each ALTER TABLE and catch "duplicate column" errors
+    console.log('[DB-MIGRATE] PRAGMA not available, will try each migration individually')
+  }
+
+  for (const migration of MTF_MIGRATIONS) {
+    if (existingColumns.has(migration.column)) {
+      skipped.push(migration.column)
+      continue
+    }
+
+    try {
+      await db.$executeRawUnsafe(migration.sql)
+      applied.push(migration.column)
+      console.log(`[DB-MIGRATE] ✅ Added column: ${migration.column}`)
+    } catch (err: any) {
+      const msg = err?.message || String(err)
+      if (msg.includes('duplicate column') || msg.includes('already exists')) {
+        skipped.push(migration.column)
+      } else {
+        errors.push(`${migration.column}: ${msg}`)
+        console.error(`[DB-MIGRATE] ❌ Error adding ${migration.column}: ${msg}`)
+      }
+    }
+  }
+
+  if (applied.length > 0) {
+    console.log(`[DB-MIGRATE] ✅ ${applied.length} columns added: ${applied.join(', ')}`)
+  }
+  if (skipped.length > 0) {
+    console.log(`[DB-MIGRATE] ⏭️ ${skipped.length} columns already exist: ${skipped.join(', ')}`)
+  }
+  if (errors.length > 0) {
+    console.error(`[DB-MIGRATE] ❌ ${errors.length} errors: ${errors.join('; ')}`)
+  }
+
+  return { applied, skipped, errors }
+}

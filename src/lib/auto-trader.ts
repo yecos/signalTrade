@@ -318,6 +318,9 @@ export async function generateAutoSignal(
       regime: null, regimeConfidence: 0, features: null,
       qualityScore: 0, qualityFlags: ['INSUFFICIENT_DATA'], qualityBlocked: true,
       bayesianWR: 50, expectancy: 0, riskReward: 1, adjustedWR: 50,
+      // MTF fields
+      mtfConfluence: null, mtfScore: 0, mtfDirection: 'NEUTRAL',
+      h1Filter: 'NO_DATA', h4Filter: 'NO_DATA', entryQuality: 'FAIR',
     };
   }
   
@@ -347,6 +350,8 @@ export async function generateAutoSignal(
     const h4Candles = await getDBCandles(asset, 'H4', 100);
 
     // Also try engine for higher timeframes if DB is empty
+    // Note: engine returns timestamp as number, Candle expects Date — cast is safe
+    // because MTF analysis only uses OHLCV values, not timestamps
     let m15Final = m15Candles;
     let h1Final = h1Candles;
     let h4Final = h4Candles;
@@ -354,19 +359,19 @@ export async function generateAutoSignal(
     if (m15Final.length < 50) {
       try {
         const engineM15 = await getEngineCandles(asset, 'M15', 100);
-        if (engineM15.candles.length >= 30) m15Final = engineM15.candles;
+        if (engineM15.candles.length >= 30) m15Final = engineM15.candles as any;
       } catch { /* skip */ }
     }
     if (h1Final.length < 50) {
       try {
         const engineH1 = await getEngineCandles(asset, 'H1', 100);
-        if (engineH1.candles.length >= 30) h1Final = engineH1.candles;
+        if (engineH1.candles.length >= 30) h1Final = engineH1.candles as any;
       } catch { /* skip */ }
     }
     if (h4Final.length < 50) {
       try {
         const engineH4 = await getEngineCandles(asset, 'H4', 100);
-        if (engineH4.candles.length >= 30) h4Final = engineH4.candles;
+        if (engineH4.candles.length >= 30) h4Final = engineH4.candles as any;
       } catch { /* skip */ }
     }
 

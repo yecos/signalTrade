@@ -13,7 +13,7 @@ config({ path: '../.env' });
 config({ path: '.env' });
 
 // ─── Imports from project libs ──────────────────────────────────────────────
-import { db } from '../src/lib/db';
+import { db, runAutoMigration } from '../src/lib/db';
 import { evaluateSignal, checkAlerts } from '../src/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus, getCandles as getEngineCandles } from '../src/lib/market-engine';
 import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSignal } from '../src/lib/auto-trader';
@@ -483,6 +483,20 @@ function startStatusServer(): Promise<void> {
         return;
       }
 
+      // NEW: Force database migration
+      if (url.pathname === '/migrate') {
+        try {
+          log('INFO', '🔄 Migración manual solicitada vía /migrate');
+          const result = await runAutoMigration();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, ...result }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
       // Default: simple status JSON
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -504,6 +518,7 @@ function startStatusServer(): Promise<void> {
           runNow: '/run-now',
           optimalConfig: '/optimal-config (GET — aplica config óptima)',
           setConfig: '/set-config (POST — config personalizada)',
+          migrate: '/migrate (GET — fuerza migración de DB)',
         },
         dashboard: 'https://signal-trade-seven.vercel.app',
       }, null, 2));
@@ -551,6 +566,22 @@ async function main(): Promise<void> {
       log('ERROR', `No se pudo conectar a Turso DB: ${err.message}`);
       process.exit(1);
     }
+  }
+
+  // ─── AUTO-MIGRATION: Add missing columns (MTF etc.) ──────────────────────
+  try {
+    log('INFO', '🔄 Verificando migraciones de base de datos...');
+    const migrationResult = await runAutoMigration();
+    if (migrationResult.applied.length > 0) {
+      log('INFO', `✅ Migración aplicada: ${migrationResult.applied.join(', ')}`);
+    } else if (migrationResult.skipped.length > 0) {
+      log('INFO', `⏭️ Migración OK (columnas ya existen: ${migrationResult.skipped.join(', ')})`);
+    }
+    if (migrationResult.errors.length > 0) {
+      log('WARN', `⚠️ Errores en migración: ${migrationResult.errors.join('; ')}`);
+    }
+  } catch (err: any) {
+    log('WARN', `Migración automática falló: ${err.message}. Continuando...`);
   }
 
   // Test market engine
