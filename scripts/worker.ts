@@ -213,37 +213,50 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
   return { generated: result.signalsGenerated, skipped: result.signalsSkipped, errors: result.errors };
 }
 
-// ─── Phase 3: Seed market data candles (lightweight) ────────────────────────
+// ─── Phase 3: Seed market data candles ──────────────────────────────────────
 async function seedMarketData(): Promise<{ seeded: number; total: number }> {
   const assets = ['EUR/USD', 'GBP/USD', 'BTC/USD', 'ETH/USD', 'USD/JPY'];
   let seeded = 0;
 
   for (const asset of assets) {
     try {
-      // Only save the LATEST candle per asset (not all 100) — much faster
-      const result = await getEngineCandles(asset, 'M5', 2);
-      if (result.candles && result.candles.length > 0) {
-        const latest = result.candles[result.candles.length - 1];
-        const timestamp = new Date(latest.timestamp);
-        try {
-          await db.marketCandle.upsert({
-            where: {
-              asset_timeframe_timestamp: { asset, timeframe: 'M5', timestamp },
-            },
-            create: {
-              asset, timeframe: 'M5', timestamp,
-              open: latest.open, high: latest.high, low: latest.low,
-              close: latest.close, volume: latest.volume,
-            },
-            update: {
-              open: latest.open, high: latest.high, low: latest.low,
-              close: latest.close, volume: latest.volume,
-            },
-          });
-          seeded++;
-        } catch {
-          // Skip DB errors
+      // Check how many candles we already have for this asset
+      const existingCount = await db.marketCandle.count({
+        where: { asset, timeframe: 'M5' },
+      });
+
+      if (existingCount >= 200) {
+        // We have enough history — just add the latest candle
+        const result = await getEngineCandles(asset, 'M5', 2);
+        if (result.candles && result.candles.length > 0) {
+          const latest = result.candles[result.candles.length - 1];
+          const timestamp = new Date(latest.timestamp);
+          try {
+            await db.marketCandle.upsert({
+              where: {
+                asset_timeframe_timestamp: { asset, timeframe: 'M5', timestamp },
+              },
+              create: {
+                asset, timeframe: 'M5', timestamp,
+                open: latest.open, high: latest.high, low: latest.low,
+                close: latest.close, volume: latest.volume,
+              },
+              update: {
+                open: latest.open, high: latest.high, low: latest.low,
+                close: latest.close, volume: latest.volume,
+              },
+            });
+            seeded++;
+          } catch {
+            // Skip DB errors
+          }
         }
+      } else {
+        // Not enough history — seed 100 candles from engine (CRITICAL for indicators)
+        const { seedCandlesFromEngine } = await import('../src/lib/market-data');
+        const count = await seedCandlesFromEngine(asset, 'M5');
+        if (count > 0) seeded++;
+        log('INFO', `  📊 ${asset}: ${existingCount} velas existentes → sembradas ${count} nuevas (total ~${existingCount + count})`);
       }
     } catch {
       // Skip unavailable assets
@@ -407,6 +420,64 @@ function startStatusServer(): Promise<void> {
         return;
       }
 
+      // NEW: Set auto-trader config
+      if (url.pathname === '/set-config' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const config = JSON.parse(body);
+            await db.appSettings.upsert({
+              where: { key: 'autoTraderConfig' },
+              create: { key: 'autoTraderConfig', value: JSON.stringify(config), description: 'Auto-trader configuration' },
+              update: { value: JSON.stringify(config) },
+            });
+            log('INFO', `⚙️ Config actualizada: ${JSON.stringify(config)}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, config }));
+          } catch (err: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+
+      // NEW: Apply optimal config for data collection
+      if (url.pathname === '/optimal-config') {
+        const optimalConfig = {
+          enabled: true,
+          assets: ['EUR/USD', 'GBP/USD', 'USD/JPY', 'BTC/USD', 'ETH/USD'],
+          timeframe: 'M5',
+          intervalMinutes: 5,
+          minSetupScore: 15,
+          maxConcurrentSignals: 20,
+          confidenceBoost: 0,
+          noOperarThreshold: 20,
+        };
+        try {
+          await db.appSettings.upsert({
+            where: { key: 'autoTraderConfig' },
+            create: { key: 'autoTraderConfig', value: JSON.stringify(optimalConfig), description: 'Optimal data collection config' },
+            update: { value: JSON.stringify(optimalConfig) },
+          });
+          // Also enable auto-trader
+          await db.appSettings.upsert({
+            where: { key: 'autoTraderRunning' },
+            create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
+            update: { value: 'true' },
+          });
+          state.autoTraderEnabled = true;
+          log('INFO', '🎯 Configuración ÓPTIMA aplicada — Modo recolección de datos');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Configuración óptima aplicada', config: optimalConfig }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
       // Default: simple status JSON
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -426,6 +497,8 @@ function startStatusServer(): Promise<void> {
           activate: '/activate',
           deactivate: '/deactivate',
           runNow: '/run-now',
+          optimalConfig: '/optimal-config (GET — aplica config óptima)',
+          setConfig: '/set-config (POST — config personalizada)',
         },
         dashboard: 'https://signal-trade-seven.vercel.app',
       }, null, 2));
