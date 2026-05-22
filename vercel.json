@@ -1,0 +1,15 @@
+{
+  "buildCommand": "npx prisma generate && next build",
+  "installCommand": "bun install",
+  "framework": "nextjs",
+  "regions": ["iad1"],
+  "env": {
+    "DATABASE_URL": "file:./db/custom.db"
+  },
+  "crons": [
+    {
+      "path": "/api/signals/check-pending",
+      "schedule": "*/10 * * * *"
+    }
+  ]
+}
