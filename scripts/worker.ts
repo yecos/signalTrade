@@ -367,7 +367,7 @@ async function runCycle(): Promise<void> {
 // ─── Status HTTP Server ─────────────────────────────────────────────────────
 function startStatusServer(): Promise<void> {
   return new Promise((resolve) => {
-    const server = createServer((req, res) => {
+    const server = createServer(async (req, res) => {
       const url = new URL(req.url || '/', `http://localhost:${STATUS_PORT}`);
 
       if (url.pathname === '/health') {
