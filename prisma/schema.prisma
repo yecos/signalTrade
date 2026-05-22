@@ -1,0 +1,58 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Signal {
+  id                 String   @id @default(cuid())
+  asset              String
+  timeframe          String
+  direction          String   // HIGHER, LOWER, NO_OPERAR
+  entryPrice         Float
+  entryTime          DateTime
+  expirationMinutes  Int
+  expirationTime     DateTime
+  confidence         Float    // 0-100
+  aiReason           String?
+  technicalJson      String?  // JSON string
+  patternsJson       String?  // JSON string
+  volumeJson         String?  // JSON string
+  newsJson           String?  // JSON string
+  sentimentJson      String?  // JSON string
+  macroJson          String?  // JSON string
+  fullAnalysisJson   String?  // JSON string
+  exitPrice          Float?
+  result             String?  // WIN, LOSS, DRAW, NO_OPERAR
+  priceDifference    Float?
+  estimatedProfit    Float?
+  estimatedLoss      Float?
+  status             String   @default("PENDING") // PENDING, CLOSED, CANCELLED
+  screenshotUrl      String?
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model Alert {
+  id          String   @id @default(cuid())
+  type        String   // CONSECUTIVE_LOSSES, LOW_WINRATE, LATERAL_MARKET, HIGH_IMPACT_NEWS, HIGH_SPREAD, EXTREME_VOLATILITY, CONTRADICTORY_SIGNALS, BAD_ASSET_PERFORMANCE
+  message     String
+  severity    String   @default("warning") // info, warning, critical
+  isActive    Boolean  @default(true)
+  dismissedAt DateTime?
+  signalId    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+model AppSettings {
+  id                    String   @id @default(cuid())
+  key                   String   @unique
+  value                 String
+  description           String?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+}
