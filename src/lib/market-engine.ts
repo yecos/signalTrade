@@ -37,7 +37,7 @@ export interface MarketEngineStatus {
 
 const COINGECKO_BASE = 'https://api.coingecko.com/api/v3';
 const TWELVEDATA_BASE = 'https://api.twelvedata.com';
-const FRANKFURTER_BASE = 'https://api.frankfurter.app';
+const FRANKFURTER_BASE = 'https://api.frankfurter.dev/v1';
 
 const BINANCE_ENDPOINTS = [
   'https://data-api.binance.vision/api/v3',

@@ -419,7 +419,11 @@ export function checkAlerts(signals: SignalRecord[]): AlertCondition[] {
   return alerts;
 }
 
-// === SIMULATED EXIT PRICE (uses market data engine when available) ===
+// === SIMULATED EXIT PRICE ===
+// WARNING: These functions should ONLY be used when no real price is available.
+// Simulated prices are NOT reliable for trading decisions.
+// The system now marks signals as UNVERIFIABLE instead of using simulated prices.
+
 export async function simulateExitPriceAsync(entryPrice: number, direction: string, asset: string): Promise<number> {
   // Try to get real price from market data engine
   try {
@@ -431,23 +435,22 @@ export async function simulateExitPriceAsync(entryPrice: number, direction: stri
     // Fallback to simulation
   }
   
-  // Simulate realistic price movement
+  // Pure random walk - NO directional bias (50/50)
+  // This gives an expected win rate of ~50%, which is honest
   const volatility = 0.001 + Math.random() * 0.003;
   const movement = entryPrice * volatility;
-  const bias = direction === "HIGHER" ? 0.55 : direction === "LOWER" ? 0.45 : 0.5;
-  const goesUp = Math.random() < bias;
+  const goesUp = Math.random() < 0.5; // FAIR - no bias
   const exitPrice = goesUp
     ? entryPrice + movement
     : entryPrice - movement;
   return Math.round(exitPrice * 100000) / 100000;
 }
 
-// Legacy sync version
+// Legacy sync version - also unbiased
 export function simulateExitPrice(entryPrice: number, direction: string): number {
   const volatility = 0.001 + Math.random() * 0.003;
   const movement = entryPrice * volatility;
-  const bias = direction === "HIGHER" ? 0.55 : direction === "LOWER" ? 0.45 : 0.5;
-  const goesUp = Math.random() < bias;
+  const goesUp = Math.random() < 0.5; // FAIR - no bias
   const exitPrice = goesUp
     ? entryPrice + movement
     : entryPrice - movement;

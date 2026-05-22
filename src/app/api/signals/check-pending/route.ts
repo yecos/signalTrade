@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
-import { evaluateSignal, simulateExitPrice, checkAlerts } from "@/lib/signals";
+import { evaluateSignal, checkAlerts } from "@/lib/signals";
 import { getLatestPrice as getEngineLatestPrice } from "@/lib/market-engine";
 import { getLatestPrice as getDBLatestPrice } from "@/lib/market-data";
 import { updateSetupStats } from "@/lib/auto-trader";
@@ -18,44 +18,66 @@ export async function POST() {
     });
 
     if (expiredSignals.length === 0) {
-      // Also check if auto-trader should run a cycle
       const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
       if (runningSetting?.value === 'true') {
-        // Auto-trader is running but nothing to close - signal the checker
         return NextResponse.json({ checked: 0, closed: 0, autoTraderActive: true });
       }
       return NextResponse.json({ checked: 0, closed: 0 });
     }
 
     let closedCount = 0;
+    const verificationDetails: Array<{ signalId: string; asset: string; exitPrice: number; source: string }> = [];
 
     for (const signal of expiredSignals) {
-      // Try to get real price from market engine first, then DB, then simulate
       let exitPrice: number;
+      let priceSource: string;
+
       try {
-        // Try real market engine (Binance/TwelveData)
+        // 1. Try real market engine (CoinGecko, Binance, TwelveData)
         const engineResult = await getEngineLatestPrice(signal.asset);
-        const latestPrice = engineResult.price;
-        if (latestPrice && latestPrice > 0 && engineResult.source !== 'FALLBACK') {
-          // Use real market price with slight variation for realistic verification
-          const variation = latestPrice * (Math.random() * 0.001 - 0.0005);
-          exitPrice = latestPrice + variation;
+        if (engineResult.price > 0 && engineResult.source !== 'FALLBACK') {
+          // Use the EXACT real market price - NO random variation
+          // For trading verification, accuracy is critical
+          exitPrice = engineResult.price;
+          priceSource = engineResult.source;
         } else {
-          // Try DB price
+          // 2. Try DB price (stored candles)
           const dbPrice = await getDBLatestPrice(signal.asset);
           if (dbPrice && dbPrice > 0) {
-            const variation = dbPrice * (Math.random() * 0.001 - 0.0005);
-            exitPrice = dbPrice + variation;
+            exitPrice = dbPrice;
+            priceSource = 'DB_CANDLES';
           } else {
-            exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+            // 3. No real price available - mark as unverifiable
+            // Instead of faking a price, we skip verification and flag it
+            await db.signal.update({
+              where: { id: signal.id },
+              data: {
+                status: "CLOSED",
+                result: "DRAW", // Cannot verify without real price
+                verificationMethod: "UNVERIFIABLE",
+              },
+            });
+            closedCount++;
+            continue;
           }
         }
+
         // Round appropriately for asset type
         if (signal.asset.includes('JPY')) exitPrice = Math.round(exitPrice * 100) / 100;
         else if (signal.asset.includes('BTC') || signal.asset.includes('ETH')) exitPrice = Math.round(exitPrice * 100) / 100;
         else exitPrice = Math.round(exitPrice * 100000) / 100000;
       } catch {
-        exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+        // Cannot get any price - mark as unverifiable
+        await db.signal.update({
+          where: { id: signal.id },
+          data: {
+            status: "CLOSED",
+            result: "DRAW",
+            verificationMethod: "UNVERIFIABLE",
+          },
+        });
+        closedCount++;
+        continue;
       }
 
       const priceDifference = Math.round((exitPrice - signal.entryPrice) * 100000) / 100000;
@@ -81,7 +103,15 @@ export async function POST() {
           estimatedProfit,
           estimatedLoss,
           status: "CLOSED",
+          verificationMethod: priceSource,
         },
+      });
+
+      verificationDetails.push({
+        signalId: signal.id,
+        asset: signal.asset,
+        exitPrice,
+        source: priceSource,
       });
 
       // Update setup stats for AUTO signals
@@ -111,21 +141,13 @@ export async function POST() {
 
     for (const alert of alertConditions) {
       const existingAlert = await db.alert.findFirst({
-        where: {
-          type: alert.type,
-          isActive: true,
-        },
+        where: { type: alert.type, isActive: true },
         orderBy: { createdAt: "desc" },
       });
 
       if (!existingAlert) {
         await db.alert.create({
-          data: {
-            type: alert.type,
-            message: alert.message,
-            severity: alert.severity,
-            isActive: true,
-          },
+          data: { type: alert.type, message: alert.message, severity: alert.severity, isActive: true },
         });
       }
     }
@@ -133,6 +155,7 @@ export async function POST() {
     return NextResponse.json({
       checked: expiredSignals.length,
       closed: closedCount,
+      verifications: verificationDetails,
     });
   } catch (error) {
     console.error("Error checking pending signals:", error);
