@@ -216,50 +216,55 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
 // ─── Phase 3: Seed market data candles ──────────────────────────────────────
 async function seedMarketData(): Promise<{ seeded: number; total: number }> {
   const assets = ['EUR/USD', 'GBP/USD', 'BTC/USD', 'ETH/USD', 'USD/JPY'];
+  const timeframes = ['M5', 'M15', 'H1', 'H4']; // MTF: seed all timeframes
   let seeded = 0;
 
   for (const asset of assets) {
-    try {
-      // Check how many candles we already have for this asset
-      const existingCount = await db.marketCandle.count({
-        where: { asset, timeframe: 'M5' },
-      });
+    for (const tf of timeframes) {
+      try {
+        // Check how many candles we already have for this asset+timeframe
+        const existingCount = await db.marketCandle.count({
+          where: { asset, timeframe: tf },
+        });
 
-      if (existingCount >= 200) {
-        // We have enough history — just add the latest candle
-        const result = await getEngineCandles(asset, 'M5', 2);
-        if (result.candles && result.candles.length > 0) {
-          const latest = result.candles[result.candles.length - 1];
-          const timestamp = new Date(latest.timestamp);
-          try {
-            await db.marketCandle.upsert({
-              where: {
-                asset_timeframe_timestamp: { asset, timeframe: 'M5', timestamp },
-              },
-              create: {
-                asset, timeframe: 'M5', timestamp,
-                open: latest.open, high: latest.high, low: latest.low,
-                close: latest.close, volume: latest.volume,
-              },
-              update: {
-                open: latest.open, high: latest.high, low: latest.low,
-                close: latest.close, volume: latest.volume,
-              },
-            });
-            seeded++;
-          } catch {
-            // Skip DB errors
+        if (existingCount >= 200) {
+          // We have enough history — just add the latest candle
+          const result = await getEngineCandles(asset, tf, 2);
+          if (result.candles && result.candles.length > 0) {
+            const latest = result.candles[result.candles.length - 1];
+            const timestamp = new Date(latest.timestamp);
+            try {
+              await db.marketCandle.upsert({
+                where: {
+                  asset_timeframe_timestamp: { asset, timeframe: tf, timestamp },
+                },
+                create: {
+                  asset, timeframe: tf, timestamp,
+                  open: latest.open, high: latest.high, low: latest.low,
+                  close: latest.close, volume: latest.volume,
+                },
+                update: {
+                  open: latest.open, high: latest.high, low: latest.low,
+                  close: latest.close, volume: latest.volume,
+                },
+              });
+              if (tf === 'M5') seeded++; // Count only M5 for the summary
+            } catch {
+              // Skip DB errors
+            }
+          }
+        } else {
+          // Not enough history — seed from engine (CRITICAL for MTF analysis)
+          const { seedCandlesFromEngine } = await import('../src/lib/market-data');
+          const count = await seedCandlesFromEngine(asset, tf);
+          if (count > 0 && tf === 'M5') seeded++;
+          if (count > 0) {
+            log('INFO', `  📊 ${asset} ${tf}: ${existingCount} velas existentes → sembradas ${count} nuevas`);
           }
         }
-      } else {
-        // Not enough history — seed 100 candles from engine (CRITICAL for indicators)
-        const { seedCandlesFromEngine } = await import('../src/lib/market-data');
-        const count = await seedCandlesFromEngine(asset, 'M5');
-        if (count > 0) seeded++;
-        log('INFO', `  📊 ${asset}: ${existingCount} velas existentes → sembradas ${count} nuevas (total ~${existingCount + count})`);
+      } catch {
+        // Skip unavailable assets/timeframes
       }
-    } catch {
-      // Skip unavailable assets
     }
   }
 

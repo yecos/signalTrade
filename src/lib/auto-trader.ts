@@ -1,5 +1,5 @@
-// AUTO-TRADER ENGINE v2 — Full Statistical Pipeline
-// Market Data → Indicators → Patterns → Session → Regime → Features → Quality → Bayesian → Expectancy → Signal
+// AUTO-TRADER ENGINE v3 — Full Statistical Pipeline + Multi-Timeframe Confluence
+// Market Data → Indicators → Patterns → Session → Regime → MTF → Features → Quality → Bayesian → Expectancy → Signal
 // The goal is to BUILD THE DATASET with maximum feature richness for later analysis
 // "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
 
@@ -15,6 +15,7 @@ import { computeSignalFeatures, type SignalFeatures } from './feature-engineerin
 import { checkQuality, quickQualityScore, toQualityFeatures, type QualityResult, type QualityFlag } from './quality-filter';
 import { calculateBayesianStats, quickBayesianWR } from './bayesian-engine';
 import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './expectancy-engine';
+import { quickMTFScore, type MTFConfluence } from './mtf-analysis';
 
 // === TYPES ===
 
@@ -74,6 +75,13 @@ export interface SignalGenerationResult {
   expectancy: number;
   riskReward: number;
   adjustedWR: number;
+  // === NEW: Phase 5 MTF fields ===
+  mtfConfluence: MTFConfluence | null;
+  mtfScore: number;
+  mtfDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
+  h1Filter: 'PASS' | 'FAIL' | 'NO_DATA';
+  h4Filter: 'PASS' | 'FAIL' | 'NO_DATA';
+  entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' | 'DANGEROUS';
 }
 
 // === DEFAULT CONFIG ===
@@ -235,8 +243,8 @@ function calculateIndicatorAlignment(ind: IndicatorSnapshot): number {
   return Math.min(20, Math.max(0, normalized));
 }
 
-// === GENERATE SIGNAL (CORE PIPELINE v2) ===
-// Full pipeline: Market → Indicators → Patterns → Session → Regime → Features → Quality → Bayesian → Signal
+// === GENERATE SIGNAL (CORE PIPELINE v3) ===
+// Full pipeline: Market → Indicators → Patterns → Session → Regime → MTF → Features → Quality → Bayesian → Signal
 
 export async function generateAutoSignal(
   asset: string,
@@ -244,7 +252,7 @@ export async function generateAutoSignal(
 ): Promise<SignalGenerationResult> {
   const now = new Date();
   const session = detectSession(now);
-  
+
   // Default new fields
   let regimeResult: RegimeResult | null = null;
   let features: SignalFeatures | null = null;
@@ -253,6 +261,14 @@ export async function generateAutoSignal(
   let expectancy = 0;
   let riskReward = 1;
   let adjustedWR = 50;
+
+  // === NEW Phase 5: MTF fields ===
+  let mtfConfluence: MTFConfluence | null = null;
+  let mtfScore = 0;
+  let mtfDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
+  let h1Filter: 'PASS' | 'FAIL' | 'NO_DATA' = 'NO_DATA';
+  let h4Filter: 'PASS' | 'FAIL' | 'NO_DATA' = 'NO_DATA';
+  let entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' | 'DANGEROUS' = 'FAIR';
   
   // Step 1: Get market data - try REAL market engine first, then fall back to DB
   let candles: any[] = [];
@@ -322,6 +338,49 @@ export async function generateAutoSignal(
   
   // === NEW Step 3.6: Compute signal features (20+ variables) ===
   features = computeSignalFeatures(candles, indicators, regimeResult, session);
+
+  // === NEW Step 3.7: Multi-Timeframe Analysis ===
+  try {
+    // Fetch higher timeframe candles from DB
+    const m15Candles = await getDBCandles(asset, 'M15', 100);
+    const h1Candles = await getDBCandles(asset, 'H1', 100);
+    const h4Candles = await getDBCandles(asset, 'H4', 100);
+
+    // Also try engine for higher timeframes if DB is empty
+    let m15Final = m15Candles;
+    let h1Final = h1Candles;
+    let h4Final = h4Candles;
+
+    if (m15Final.length < 50) {
+      try {
+        const engineM15 = await getEngineCandles(asset, 'M15', 100);
+        if (engineM15.candles.length >= 30) m15Final = engineM15.candles;
+      } catch { /* skip */ }
+    }
+    if (h1Final.length < 50) {
+      try {
+        const engineH1 = await getEngineCandles(asset, 'H1', 100);
+        if (engineH1.candles.length >= 30) h1Final = engineH1.candles;
+      } catch { /* skip */ }
+    }
+    if (h4Final.length < 50) {
+      try {
+        const engineH4 = await getEngineCandles(asset, 'H4', 100);
+        if (engineH4.candles.length >= 30) h4Final = engineH4.candles;
+      } catch { /* skip */ }
+    }
+
+    const mtfResult = quickMTFScore(candles, m15Final, h1Final, h4Final);
+    mtfConfluence = mtfResult.confluence;
+    mtfScore = mtfResult.score;
+    mtfDirection = mtfResult.confluence.overallDirection;
+    h1Filter = mtfResult.confluence.h1Filter;
+    h4Filter = mtfResult.confluence.h4Filter;
+    entryQuality = mtfResult.confluence.entryQuality;
+  } catch (err: any) {
+    // MTF analysis is best-effort — don't block signal generation
+    console.error('MTF analysis failed:', err.message);
+  }
   
   // Step 4: Determine direction
   let direction: 'HIGHER' | 'LOWER' | 'NO_OPERAR' = 'NO_OPERAR';
@@ -419,6 +478,45 @@ export async function generateAutoSignal(
     confidence = Math.min(confidence, 20);
   } else if (regimeMismatch && isDataCollectionMode) {
     reason += ` [RÉGimen: ${regimeResult.regime} - Patrón no óptimo pero generando para dataset]`;
+  }
+
+  // === NEW Step 6.7: Multi-Timeframe filter ===
+  if (mtfConfluence && direction !== 'NO_OPERAR') {
+    // MTF direction conflict: signal direction opposes higher TF trend
+    const mtfOpposesSignal = (
+      (direction === 'HIGHER' && mtfDirection === 'BEARISH') ||
+      (direction === 'LOWER' && mtfDirection === 'BULLISH')
+    );
+
+    if (mtfOpposesSignal && !isDataCollectionMode) {
+      // Production: block if H4 or H1 strongly oppose
+      if (h4Filter === 'FAIL' || (h1Filter === 'FAIL' && mtfScore < 30)) {
+        direction = 'NO_OPERAR';
+        reason = `MTF CONTRA: H4=${h4Filter}, H1=${h1Filter}, confluencia ${mtfScore}%. Señal ${direction} opuesta a tendencia multi-timeframe.`;
+        confidence = Math.min(confidence, 15);
+      }
+    } else if (mtfOpposesSignal && isDataCollectionMode) {
+      reason += ` [MTF: Confluencia ${mtfScore}% en contra pero generando para dataset]`;
+      confidence = Math.max(0, confidence - 10);
+    }
+
+    // Boost confidence for strong MTF alignment
+    if (!mtfOpposesSignal && mtfScore >= 70) {
+      confidence = Math.min(100, confidence + 10);
+      reason += ` [MTF: +10 confianza por alta confluencia ${mtfScore}%]`;
+    } else if (!mtfOpposesSignal && mtfScore >= 50) {
+      confidence = Math.min(100, confidence + 5);
+    }
+
+    // DANGEROUS entry quality → reduce confidence heavily
+    if (entryQuality === 'DANGEROUS' && !isDataCollectionMode) {
+      direction = 'NO_OPERAR';
+      reason = `MTF: Entrada DANGEROUS. H4=${h4Filter}, H1=${h1Filter}, confluencia ${mtfScore}%. No operar contra timeframes superiores.`;
+      confidence = Math.min(confidence, 10);
+    } else if (entryQuality === 'POOR') {
+      confidence = Math.max(0, confidence - 15);
+      reason += ` [MTF: Entrada POOR, -15 confianza]`;
+    }
   }
   
   // Step 7: Adjust confidence with session and setup score
@@ -567,6 +665,34 @@ export async function generateAutoSignal(
     sampleVariance,
     qualityScore: qualityResult.score,
     qualityFlags: JSON.stringify(qualityResult.flags),
+    // === NEW Phase 5: MTF fields ===
+    mtfConfluence: mtfScore,
+    mtfDirection,
+    h1Filter,
+    h4Filter,
+    entryQuality,
+    mtfJson: mtfConfluence ? JSON.stringify({
+      confluenceScore: mtfConfluence.confluenceScore,
+      timeframeAlignments: mtfConfluence.timeframeAlignments,
+      totalTimeframes: mtfConfluence.totalTimeframes,
+      overallDirection: mtfConfluence.overallDirection,
+      entryQuality: mtfConfluence.entryQuality,
+      riskLevel: mtfConfluence.riskLevel,
+      h4KeyLevel: mtfConfluence.h4KeyLevel,
+      h1KeyLevel: mtfConfluence.h1KeyLevel,
+      dominantRegime: mtfConfluence.dominantRegime,
+      analyses: Object.fromEntries(
+        Object.entries(mtfConfluence.analyses).map(([k, v]) => [k, v ? {
+          trend: v.trend,
+          trendStrength: v.trendStrength,
+          momentum: v.momentum,
+          structureType: v.structureType,
+          volumeContext: v.volumeContext,
+          regime: v.regime.regime,
+          keyLevel: v.keyLevel,
+        } : null])
+      ),
+    }) : null,
   };
   
   const signal = await db.signal.create({ data: signalData });
@@ -597,6 +723,13 @@ export async function generateAutoSignal(
     expectancy,
     riskReward: calculatedRR,
     adjustedWR,
+    // MTF fields
+    mtfConfluence,
+    mtfScore,
+    mtfDirection,
+    h1Filter,
+    h4Filter,
+    entryQuality,
   };
 }
 

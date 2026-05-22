@@ -58,6 +58,13 @@ model Signal {
   // === QUALITY (Phase 4) ===
   qualityScore           Float?   // 0-100: quality filter composite score
   qualityFlags           String?  // JSON: array of quality flags (low_liquidity, high_spread, etc.)
+  // === MULTI-TIMEFRAME (Phase 5) ===
+  mtfConfluence          Float?   // 0-100: MTF confluence score
+  mtfDirection           String?  // BULLISH, BEARISH, NEUTRAL
+  h1Filter               String?  // PASS, FAIL, NO_DATA
+  h4Filter               String?  // PASS, FAIL, NO_DATA
+  entryQuality           String?  // EXCELLENT, GOOD, FAIR, POOR, DANGEROUS
+  mtfJson                String?  // JSON: full MTF analysis details
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
