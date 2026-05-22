@@ -90,6 +90,20 @@ export async function POST(request: NextRequest) {
       entryTimeDate.getTime() + expirationMinutes * 60000
     );
 
+    // Determine analysis mode and data availability for manual signals
+    const dataAvail: Record<string, boolean> = {
+      technical: !!technicalJson,
+      volume: !!volumeJson,
+      patterns: !!patternsJson,
+      sentiment: !!sentimentJson,
+      news: !!newsJson,
+      macro: !!macroJson,
+      historical: false, // manual signals don't check historical automatically
+      aiModel: false, // manual entry
+    };
+    const availCount = Object.values(dataAvail).filter(Boolean).length;
+    const analysisMode = availCount >= 6 ? "FULL" : availCount >= 3 ? "PARTIAL" : "FALLBACK";
+
     const signal = await db.signal.create({
       data: {
         asset,
@@ -110,7 +124,12 @@ export async function POST(request: NextRequest) {
         fullAnalysisJson: fullAnalysisJson || null,
         estimatedProfit: estimatedProfit ? parseFloat(estimatedProfit) : null,
         estimatedLoss: estimatedLoss ? parseFloat(estimatedLoss) : null,
-        status: "PENDING",
+        status: direction === "NO_OPERAR" ? "CLOSED" : "PENDING",
+        result: direction === "NO_OPERAR" ? "NO_OPERAR" : null,
+        analysisMode,
+        dataAvailability: JSON.stringify(dataAvail),
+        statisticalReliability: "MANUAL",
+        historicalSampleSize: 0,
       },
     });
 

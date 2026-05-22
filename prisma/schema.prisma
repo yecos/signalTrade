@@ -31,6 +31,10 @@ model Signal {
   estimatedProfit    Float?
   estimatedLoss      Float?
   status             String   @default("PENDING") // PENDING, CLOSED, CANCELLED
+  analysisMode       String   @default("FALLBACK") // FULL, PARTIAL, FALLBACK
+  dataAvailability   String?  // JSON: {"technical":true,"volume":true,"patterns":true,"sentiment":false,"news":false,"macro":false}
+  statisticalReliability String? // LOW, MEDIUM, HIGH
+  historicalSampleSize   Int?  // how many past signals were used for context
   screenshotUrl      String?
   createdAt          DateTime @default(now())
   updatedAt          DateTime @updatedAt

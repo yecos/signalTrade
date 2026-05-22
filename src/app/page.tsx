@@ -58,6 +58,10 @@ interface Signal {
   estimatedProfit: number | null;
   estimatedLoss: number | null;
   status: string;
+  analysisMode: string | null;
+  dataAvailability: string | null;
+  statisticalReliability: string | null;
+  historicalSampleSize: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -198,6 +202,70 @@ function formatPrice(price: number, asset: string): string {
   if (asset.includes("BTC")) return price.toFixed(1);
   if (asset.includes("ETH")) return price.toFixed(2);
   return price.toFixed(5);
+}
+
+function analysisModeConfig(mode: string | null): { label: string; color: string; bg: string } {
+  switch (mode) {
+    case "FULL": return { label: "FULL ANALYSIS", color: "#00ff88", bg: "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" };
+    case "PARTIAL": return { label: "PARCIAL", color: "#ffcc00", bg: "bg-[#ffcc00]/15 text-[#ffcc00] border-[#ffcc00]/30" };
+    case "FALLBACK": return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
+    default: return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
+  }
+}
+
+function reliabilityConfig(reliability: string | null): { label: string; color: string } {
+  switch (reliability) {
+    case "HIGH": return { label: "ALTA", color: "#00ff88" };
+    case "MEDIUM": return { label: "MEDIA", color: "#ffcc00" };
+    case "LOW": return { label: "BAJA", color: "#ff8800" };
+    case "INSUFFICIENT": return { label: "INSUFICIENTE", color: "#ff3366" };
+    case "MANUAL": return { label: "MANUAL", color: "#00aaff" };
+    default: return { label: "INSUFICIENTE", color: "#ff3366" };
+  }
+}
+
+interface DataAvail {
+  technical?: boolean;
+  volume?: boolean;
+  patterns?: boolean;
+  sentiment?: boolean;
+  news?: boolean;
+  macro?: boolean;
+  historical?: boolean;
+  aiModel?: boolean;
+}
+
+function parseDataAvailability(json: string | null): DataAvail {
+  if (!json) return {};
+  try { return JSON.parse(json); } catch { return {}; }
+}
+
+function DataAvailabilityBadges({ dataAvail }: { dataAvail: DataAvail }) {
+  const items: { key: string; label: string; available: boolean }[] = [
+    { key: "technical", label: "Técnicos", available: !!dataAvail.technical },
+    { key: "volume", label: "Volumen", available: !!dataAvail.volume },
+    { key: "patterns", label: "Patrones", available: !!dataAvail.patterns },
+    { key: "sentiment", label: "Sentimiento", available: !!dataAvail.sentiment },
+    { key: "news", label: "Noticias", available: !!dataAvail.news },
+    { key: "macro", label: "Macro", available: !!dataAvail.macro },
+  ];
+
+  return (
+    <div className="flex flex-wrap gap-1">
+      {items.map((item) => (
+        <span
+          key={item.key}
+          className={`text-[9px] px-1.5 py-0.5 rounded border ${
+            item.available
+              ? "bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20"
+              : "bg-[#ff3366]/10 text-[#ff3366]/60 border-[#ff3366]/20 line-through"
+          }`}
+        >
+          {item.available ? "✔" : "✘"} {item.label}
+        </span>
+      ))}
+    </div>
+  );
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -825,6 +893,8 @@ export default function TradingDashboard() {
                           <TableHead className="text-white/50 text-xs">Salida</TableHead>
                           <TableHead className="text-white/50 text-xs">Conf.</TableHead>
                           <TableHead className="text-white/50 text-xs">Resultado</TableHead>
+                          <TableHead className="text-white/50 text-xs">Modo</TableHead>
+                          <TableHead className="text-white/50 text-xs">Confiab.</TableHead>
                           <TableHead className="text-white/50 text-xs">Dif.</TableHead>
                           <TableHead className="text-white/50 text-xs">Razón IA</TableHead>
                           <TableHead className="text-white/50 text-xs">Acción</TableHead>
@@ -834,7 +904,7 @@ export default function TradingDashboard() {
                         <AnimatePresence>
                           {signals.length === 0 ? (
                             <TableRow>
-                              <TableCell colSpan={11} className="text-center text-white/30 py-8">
+                              <TableCell colSpan={13} className="text-center text-white/30 py-8">
                                 No hay señales registradas
                               </TableCell>
                             </TableRow>
@@ -888,6 +958,19 @@ export default function TradingDashboard() {
                                       {signal.status}
                                     </Badge>
                                   )}
+                                </TableCell>
+                                <TableCell>
+                                  <Badge className={`text-[9px] ${analysisModeConfig(signal.analysisMode).bg}`}>
+                                    {analysisModeConfig(signal.analysisMode).label}
+                                  </Badge>
+                                </TableCell>
+                                <TableCell>
+                                  <span className="text-[10px] font-medium" style={{ color: reliabilityConfig(signal.statisticalReliability).color }}>
+                                    {reliabilityConfig(signal.statisticalReliability).label}
+                                    {signal.historicalSampleSize !== null && signal.historicalSampleSize > 0 && (
+                                      <span className="text-white/30 ml-0.5">({signal.historicalSampleSize})</span>
+                                    )}
+                                  </span>
                                 </TableCell>
                                 <TableCell className={`text-xs font-mono ${resultColor(signal.result)}`}>
                                   {signal.priceDifference !== null ? (signal.priceDifference > 0 ? "+" : "") + signal.priceDifference.toFixed(5) : "—"}
@@ -1104,6 +1187,23 @@ export default function TradingDashboard() {
                     </CardTitle>
                   </CardHeader>
                   <CardContent className="space-y-3">
+                    {/* Analysis Mode Warning Banner */}
+                    {!manualMode && stats && stats.totalSignals < 30 && (
+                      <div className="bg-[#ff3366]/10 border border-[#ff3366]/30 rounded-lg p-3">
+                        <div className="flex items-start gap-2">
+                          <AlertTriangle className="size-4 text-[#ff3366] mt-0.5 shrink-0" />
+                          <div>
+                            <p className="text-[#ff3366] text-xs font-medium">DATOS INSUFICIENTES PARA ANÁLISIS COMPLETO</p>
+                            <p className="text-white/50 text-[10px] mt-1">
+                              Se requieren mínimo 30 señales cerradas para análisis confiable.
+                              Actualmente: {stats.totalSignals} señales.
+                              La IA generará NO_OPERAR hasta tener suficiente historial.
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {genAiReason ? (
                       <div className="bg-[#0a0e17] rounded-lg p-4 border border-white/5">
                         <p className="text-white/80 text-sm whitespace-pre-wrap">{genAiReason}</p>
@@ -1135,19 +1235,36 @@ export default function TradingDashboard() {
                           </p>
                         </div>
                         <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Mejor Activo</p>
-                          <p className="text-sm font-bold text-[#00ff88]">
-                            {stats.bestAsset || "—"}
+                          <p className="text-white/40 text-[10px] uppercase">Señales Cerradas</p>
+                          <p className={`text-lg font-bold ${stats.totalSignals >= 30 ? "text-[#00ff88]" : stats.totalSignals >= 10 ? "text-[#ffcc00]" : "text-[#ff3366]"}`}>
+                            {stats.totalSignals}
                           </p>
+                          <p className="text-white/30 text-[9px]">mín. 30 para ALTA</p>
                         </div>
                         <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Mejor Temporalidad</p>
-                          <p className="text-sm font-bold text-[#00ff88]">
-                            {stats.bestTimeframe || "—"}
+                          <p className="text-white/40 text-[10px] uppercase">Confiabilidad Estadística</p>
+                          <p className={`text-lg font-bold ${stats.totalSignals >= 500 ? "text-[#00ff88]" : stats.totalSignals >= 100 ? "text-[#ffcc00]" : "text-[#ff3366]"}`}>
+                            {stats.totalSignals >= 500 ? "ALTA" : stats.totalSignals >= 100 ? "MEDIA" : stats.totalSignals >= 30 ? "BAJA" : "INSUFICIENTE"}
                           </p>
                         </div>
                       </div>
                     )}
+
+                    {/* Data Sources Available Indicator */}
+                    <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
+                      <p className="text-white/40 text-[10px] uppercase mb-2">Fuentes de Datos Disponibles</p>
+                      <DataAvailabilityBadges dataAvail={{
+                        technical: false,
+                        volume: false,
+                        patterns: false,
+                        sentiment: false,
+                        news: false,
+                        macro: false,
+                      }} />
+                      <p className="text-white/30 text-[9px] mt-2">
+                        Las fuentes se activarán según disponibilidad del análisis IA
+                      </p>
+                    </div>
 
                     {/* Asset-specific context */}
                     {stats && genAsset && stats.winRateByAsset[genAsset] && (
