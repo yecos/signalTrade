@@ -8,41 +8,85 @@ datasource db {
 }
 
 model Signal {
-  id                 String   @id @default(cuid())
-  asset              String
-  timeframe          String
-  direction          String   // HIGHER, LOWER, NO_OPERAR
-  entryPrice         Float
-  entryTime          DateTime
-  expirationMinutes  Int
-  expirationTime     DateTime
-  confidence         Float    // 0-100
-  aiReason           String?
-  technicalJson      String?  // JSON string
-  patternsJson       String?  // JSON string
-  volumeJson         String?  // JSON string
-  newsJson           String?  // JSON string
-  sentimentJson      String?  // JSON string
-  macroJson          String?  // JSON string
-  fullAnalysisJson   String?  // JSON string
-  exitPrice          Float?
-  result             String?  // WIN, LOSS, DRAW, NO_OPERAR
-  priceDifference    Float?
-  estimatedProfit    Float?
-  estimatedLoss      Float?
-  status             String   @default("PENDING") // PENDING, CLOSED, CANCELLED
-  analysisMode       String   @default("FALLBACK") // FULL, PARTIAL, FALLBACK
-  dataAvailability   String?  // JSON: {"technical":true,"volume":true,"patterns":true,"sentiment":false,"news":false,"macro":false}
-  statisticalReliability String? // LOW, MEDIUM, HIGH
-  historicalSampleSize   Int?  // how many past signals were used for context
-  screenshotUrl      String?
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
+  id                     String   @id @default(cuid())
+  asset                  String
+  timeframe              String
+  direction              String   // HIGHER, LOWER, NO_OPERAR
+  entryPrice             Float
+  entryTime              DateTime
+  expirationMinutes      Int
+  expirationTime         DateTime
+  confidence             Float    // 0-100
+  aiReason               String?
+  technicalJson          String?  // JSON: technical indicators at entry
+  patternsJson           String?  // JSON: detected patterns
+  volumeJson             String?  // JSON: volume analysis
+  newsJson               String?  // JSON: news data
+  sentimentJson          String?  // JSON: sentiment analysis
+  macroJson              String?  // JSON: macro events
+  fullAnalysisJson       String?  // JSON: combined analysis
+  exitPrice              Float?
+  result                 String?  // WIN, LOSS, DRAW, NO_OPERAR
+  priceDifference        Float?
+  estimatedProfit        Float?
+  estimatedLoss          Float?
+  status                 String   @default("PENDING") // PENDING, CLOSED, CANCELLED
+  analysisMode           String   @default("FALLBACK") // FULL, PARTIAL, FALLBACK
+  dataAvailability       String?  // JSON: what data sources were available
+  statisticalReliability String? // LOW, MEDIUM, HIGH, INSUFFICIENT, MANUAL
+  historicalSampleSize   Int?
+  screenshotUrl          String?
+  // === NEW FIELDS FOR STATISTICAL ENGINE ===
+  patternType            String?  // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation
+  sessionType            String?  // Asia, London, New York, Overlap
+  setupScore             Float?   // 0-100: calculated from historical pattern+session performance
+  indicatorsJson         String?  // JSON: all computed indicators at signal time
+  source                 String   @default("MANUAL") // MANUAL, AUTO, AI
+  noOperarReason         String?  // Why NO_OPERAR was chosen
+  verificationMethod     String?  // SIMULATED, REAL
+  createdAt              DateTime @default(now())
+  updatedAt              DateTime @updatedAt
+}
+
+model MarketCandle {
+  id        String   @id @default(cuid())
+  asset     String   // EUR/USD, GBP/USD, etc.
+  timeframe String   // M1, M5, M15, M30, H1, H4, D1
+  timestamp DateTime
+  open      Float
+  high      Float
+  low       Float
+  close     Float
+  volume    Float
+  createdAt DateTime @default(now())
+
+  @@unique([asset, timeframe, timestamp])
+  @@index([asset, timeframe, timestamp])
+}
+
+model SetupStats {
+  id            String   @id @default(cuid())
+  patternType   String   // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation
+  asset         String?  // null = all assets
+  session       String?  // null = all sessions; Asia, London, New York, Overlap
+  timeframe     String?  // null = all timeframes
+  totalSignals  Int      @default(0)
+  wins          Int      @default(0)
+  losses        Int      @default(0)
+  draws         Int      @default(0)
+  noOperarCount Int      @default(0)
+  winRate       Float    @default(0)
+  avgConfidence Float    @default(0)
+  avgSetupScore Float    @default(0)
+  lastUpdated   DateTime @updatedAt
+  createdAt     DateTime @default(now())
+
+  @@unique([patternType, asset, session, timeframe])
 }
 
 model Alert {
   id          String   @id @default(cuid())
-  type        String   // CONSECUTIVE_LOSSES, LOW_WINRATE, LATERAL_MARKET, HIGH_IMPACT_NEWS, HIGH_SPREAD, EXTREME_VOLATILITY, CONTRADICTORY_SIGNALS, BAD_ASSET_PERFORMANCE
+  type        String
   message     String
   severity    String   @default("warning") // info, warning, critical
   isActive    Boolean  @default(true)
@@ -53,10 +97,10 @@ model Alert {
 }
 
 model AppSettings {
-  id                    String   @id @default(cuid())
-  key                   String   @unique
-  value                 String
-  description           String?
-  createdAt             DateTime @default(now())
-  updatedAt             DateTime @updatedAt
+  id          String   @id @default(cuid())
+  key         String   @unique
+  value       String
+  description String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 }

@@ -1,6 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { evaluateSignal, simulateExitPrice, checkAlerts } from "@/lib/signals";
+import { getLatestPrice } from "@/lib/market-data";
+import { updateSetupStats } from "@/lib/auto-trader";
 
 export async function POST() {
   try {
@@ -15,14 +17,37 @@ export async function POST() {
     });
 
     if (expiredSignals.length === 0) {
+      // Also check if auto-trader should run a cycle
+      const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
+      if (runningSetting?.value === 'true') {
+        // Auto-trader is running but nothing to close - signal the checker
+        return NextResponse.json({ checked: 0, closed: 0, autoTraderActive: true });
+      }
       return NextResponse.json({ checked: 0, closed: 0 });
     }
 
     let closedCount = 0;
 
     for (const signal of expiredSignals) {
-      // Simulate exit price for demo mode
-      const exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+      // Try to get real price from market data engine, fallback to simulation
+      let exitPrice: number;
+      try {
+        const latestPrice = await getLatestPrice(signal.asset);
+        if (latestPrice && latestPrice > 0) {
+          // Use market data with slight random variation for realistic verification
+          const variation = latestPrice * (Math.random() * 0.001 - 0.0005);
+          exitPrice = latestPrice + variation;
+          // Round appropriately for asset type
+          if (signal.asset.includes('JPY')) exitPrice = Math.round(exitPrice * 100) / 100;
+          else if (signal.asset.includes('BTC') || signal.asset.includes('ETH')) exitPrice = Math.round(exitPrice * 100) / 100;
+          else exitPrice = Math.round(exitPrice * 100000) / 100000;
+        } else {
+          exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+        }
+      } catch {
+        exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+      }
+
       const priceDifference = Math.round((exitPrice - signal.entryPrice) * 100000) / 100000;
       const result = evaluateSignal(signal.direction, signal.entryPrice, exitPrice);
 
@@ -49,6 +74,19 @@ export async function POST() {
         },
       });
 
+      // Update setup stats for AUTO signals
+      if (signal.source === 'AUTO' && result !== 'DRAW') {
+        await updateSetupStats({
+          patternType: signal.patternType,
+          asset: signal.asset,
+          sessionType: signal.sessionType,
+          timeframe: signal.timeframe,
+          result: result || '',
+          confidence: signal.confidence,
+          setupScore: signal.setupScore,
+        });
+      }
+
       closedCount++;
     }
 
@@ -62,7 +100,6 @@ export async function POST() {
     const alertConditions = checkAlerts(allClosedSignals as Parameters<typeof checkAlerts>[0]);
 
     for (const alert of alertConditions) {
-      // Check if similar alert already exists and is active
       const existingAlert = await db.alert.findFirst({
         where: {
           type: alert.type,

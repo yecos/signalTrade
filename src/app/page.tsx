@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   Tabs, TabsContent, TabsList, TabsTrigger,
 } from "@/components/ui/tabs";
@@ -20,7 +20,9 @@ import { Progress } from "@/components/ui/progress";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Separator } from "@/components/ui/separator";
 import { Label } from "@/components/ui/label";
-import { Textarea } from "@/components/ui/textarea";
+import { Switch } from "@/components/ui/switch";
+import { Slider } from "@/components/ui/slider";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip,
   ResponsiveContainer, LineChart, Line, PieChart, Pie, Cell, Legend,
@@ -28,7 +30,10 @@ import {
 import {
   TrendingUp, TrendingDown, Activity, BarChart3, Bell, Bot,
   RefreshCw, CheckCircle, XCircle, MinusCircle, AlertTriangle,
-  Clock, Zap, Target, Shield, Brain, Eye, Loader2, ChevronLeft, ChevronRight,
+  Clock, Zap, Target, Shield, Brain, Eye, Loader2, Play, Square,
+  Sun, Moon, Globe, Flame, Crosshair, ChevronLeft, ChevronRight,
+  Database, Sparkles, Wifi, WifiOff, Gauge, Timer, AlertOctagon,
+  ArrowUpRight, ArrowDownRight, CircleDot, Layers,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -62,6 +67,11 @@ interface Signal {
   dataAvailability: string | null;
   statisticalReliability: string | null;
   historicalSampleSize: number | null;
+  patternType: string | null;
+  sessionType: string | null;
+  setupScore: number | null;
+  source: string;
+  noOperarReason: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -83,12 +93,19 @@ interface Stats {
   winRateByTimeframe: Record<string, { wins: number; total: number; rate: number }>;
   winRateByDirection: Record<string, { wins: number; total: number; rate: number }>;
   winRateByHour: Record<string, { wins: number; total: number; rate: number }>;
+  winRateByPattern: Record<string, { wins: number; total: number; rate: number }>;
+  winRateBySession: Record<string, { wins: number; total: number; rate: number }>;
+  winRateBySource: Record<string, { wins: number; total: number; rate: number }>;
   bestAsset: string | null;
   worstAsset: string | null;
   bestTimeframe: string | null;
   worstTimeframe: string | null;
   bestHour: string | null;
   worstHour: string | null;
+  bestPattern: string | null;
+  worstPattern: string | null;
+  bestSession: string | null;
+  worstSession: string | null;
   currentConsecutiveWins: number;
   currentConsecutiveLosses: number;
   maxConsecutiveWins: number;
@@ -96,6 +113,9 @@ interface Stats {
   weeklyPerformance: Array<{ week: string; wins: number; losses: number; draws: number; total: number; winRate: number }>;
   monthlyPerformance: Array<{ month: string; wins: number; losses: number; draws: number; total: number; winRate: number }>;
   recommendedConfidenceThreshold: number;
+  statisticalReliability: string;
+  sampleSize: number;
+  sampleAdequacy: string;
 }
 
 interface Alert {
@@ -133,28 +153,119 @@ interface BacktestingInsights {
   warnings: string[];
 }
 
-// ─── Helpers ─────────────────────────────────────────────────────────────────
+interface AutoTraderState {
+  isRunning: boolean;
+  lastCheck: string | null;
+  totalGenerated: number;
+  totalVerified: number;
+  currentPending: number;
+  cyclesCompleted: number;
+  errors: string[];
+  recentSignals: Array<{
+    id: string;
+    asset: string;
+    direction: string;
+    pattern: string | null;
+    confidence: number;
+    setupScore: number | null;
+    status: string;
+  }>;
+}
 
-const ASSETS = ["EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD", "EUR/GBP", "BTC/USD", "ETH/USD"];
+interface AutoTraderConfig {
+  enabled: boolean;
+  assets: string[];
+  timeframe: string;
+  intervalMinutes: number;
+  minSetupScore: number;
+  maxConcurrentSignals: number;
+  confidenceBoost: number;
+  noOperarThreshold: number;
+}
+
+interface SetupScoreEntry {
+  patternType: string;
+  asset: string | null;
+  session: string | null;
+  totalSignals: number;
+  wins: number;
+  losses: number;
+  winRate: number;
+  avgSetupScore: number;
+  avgConfidence: number;
+  edge: "POSITIVE" | "NEGATIVE" | "NEUTRAL" | "UNKNOWN";
+  sampleAdequacy: "INSUFFICIENT" | "LOW" | "MEDIUM" | "HIGH";
+}
+
+interface SetupScoresResponse {
+  scores: SetupScoreEntry[];
+  summary: {
+    byPattern: Record<string, { totalSignals: number; wins: number; losses: number; winRate: number; edge: string }>;
+    bySession: Record<string, { totalSignals: number; wins: number; losses: number; winRate: number; edge: string }>;
+    totalPatterns: number;
+    totalSessions: number;
+    totalDataPoints: number;
+  };
+}
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const ASSETS = ["EUR/USD", "GBP/USD", "USD/JPY", "BTC/USD", "ETH/USD"];
 const TIMEFRAMES = ["M1", "M5", "M15", "M30", "H1"];
-const DIRECTIONS = ["HIGHER", "LOWER", "NO_OPERAR"];
-const EXP_MAP: Record<string, number> = { M1: 1, M5: 5, M15: 15, M30: 30, H1: 60 };
+const PATTERN_TYPES = ["breakout", "liquidity_sweep", "engulfing", "fakeout", "reversal", "trend_continuation"];
+const SESSION_TYPES = ["Asia", "London", "NewYork", "Overlap", "OffHours"];
 
 const NEON_GREEN = "#00ff88";
 const NEON_RED = "#ff3366";
-const NEON_YELLOW = "#ffcc00";
+const NEON_YELLOW = "#ffaa00";
 const NEON_BLUE = "#00aaff";
 const NEON_PURPLE = "#aa66ff";
 const NEON_CYAN = "#00ffcc";
 const CHART_COLORS = [NEON_GREEN, NEON_RED, NEON_YELLOW, NEON_BLUE, NEON_PURPLE, NEON_CYAN];
 
+const PATTERN_NAMES: Record<string, string> = {
+  breakout: "Ruptura",
+  liquidity_sweep: "Barrido Liquidez",
+  engulfing: "Envolvente",
+  fakeout: "Falsa Ruptura",
+  reversal: "Reversión",
+  trend_continuation: "Continuación",
+};
+
+const PATTERN_ICONS: Record<string, React.ReactNode> = {
+  breakout: <Flame className="size-4" />,
+  liquidity_sweep: <Crosshair className="size-4" />,
+  engulfing: <Layers className="size-4" />,
+  fakeout: <AlertOctagon className="size-4" />,
+  reversal: <RefreshCw className="size-4" />,
+  trend_continuation: <TrendingUp className="size-4" />,
+};
+
+const SESSION_NAMES: Record<string, string> = {
+  Asia: "Asia",
+  London: "Londres",
+  NewYork: "Nueva York",
+  Overlap: "Solape",
+  OffHours: "Fuera de sesión",
+};
+
+const SESSION_COLORS: Record<string, string> = {
+  Asia: "#ff8800",
+  London: "#00aaff",
+  NewYork: "#00ff88",
+  Overlap: "#ffaa00",
+  OffHours: "#666666",
+};
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
 function resultColor(result: string | null): string {
   switch (result) {
     case "WIN": return "text-[#00ff88]";
     case "LOSS": return "text-[#ff3366]";
-    case "DRAW": return "text-[#ffcc00]";
+    case "DRAW": return "text-[#ffaa00]";
     case "NO_OPERAR": return "text-[#00aaff]";
-    default: return "text-[#ffcc00]";
+    default: return "text-[#ffaa00]";
   }
 }
 
@@ -162,15 +273,15 @@ function resultBg(result: string | null): string {
   switch (result) {
     case "WIN": return "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30";
     case "LOSS": return "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30";
-    case "DRAW": return "bg-[#ffcc00]/15 text-[#ffcc00] border-[#ffcc00]/30";
+    case "DRAW": return "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30";
     case "NO_OPERAR": return "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30";
-    default: return "bg-[#ffcc00]/15 text-[#ffcc00] border-[#ffcc00]/30";
+    default: return "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30";
   }
 }
 
 function statusBg(status: string): string {
   switch (status) {
-    case "PENDING": return "bg-[#ffcc00]/15 text-[#ffcc00] border-[#ffcc00]/30";
+    case "PENDING": return "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30";
     case "CLOSED": return "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30";
     case "CANCELLED": return "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30";
     default: return "";
@@ -186,7 +297,7 @@ function directionIcon(direction: string) {
 function severityColor(severity: string): string {
   switch (severity) {
     case "critical": return "bg-[#ff3366]/20 text-[#ff3366] border-[#ff3366]/40";
-    case "warning": return "bg-[#ffcc00]/20 text-[#ffcc00] border-[#ffcc00]/40";
+    case "warning": return "bg-[#ffaa00]/20 text-[#ffaa00] border-[#ffaa00]/40";
     default: return "bg-[#00aaff]/20 text-[#00aaff] border-[#00aaff]/40";
   }
 }
@@ -206,8 +317,8 @@ function formatPrice(price: number, asset: string): string {
 
 function analysisModeConfig(mode: string | null): { label: string; color: string; bg: string } {
   switch (mode) {
-    case "FULL": return { label: "FULL ANALYSIS", color: "#00ff88", bg: "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" };
-    case "PARTIAL": return { label: "PARCIAL", color: "#ffcc00", bg: "bg-[#ffcc00]/15 text-[#ffcc00] border-[#ffcc00]/30" };
+    case "FULL": return { label: "FULL", color: "#00ff88", bg: "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" };
+    case "PARTIAL": return { label: "PARCIAL", color: "#ffaa00", bg: "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30" };
     case "FALLBACK": return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
     default: return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
   }
@@ -216,7 +327,7 @@ function analysisModeConfig(mode: string | null): { label: string; color: string
 function reliabilityConfig(reliability: string | null): { label: string; color: string } {
   switch (reliability) {
     case "HIGH": return { label: "ALTA", color: "#00ff88" };
-    case "MEDIUM": return { label: "MEDIA", color: "#ffcc00" };
+    case "MEDIUM": return { label: "MEDIA", color: "#ffaa00" };
     case "LOW": return { label: "BAJA", color: "#ff8800" };
     case "INSUFFICIENT": return { label: "INSUFICIENTE", color: "#ff3366" };
     case "MANUAL": return { label: "MANUAL", color: "#00aaff" };
@@ -224,80 +335,209 @@ function reliabilityConfig(reliability: string | null): { label: string; color: 
   }
 }
 
-interface DataAvail {
-  technical?: boolean;
-  volume?: boolean;
-  patterns?: boolean;
-  sentiment?: boolean;
-  news?: boolean;
-  macro?: boolean;
-  historical?: boolean;
-  aiModel?: boolean;
+function setupScoreColor(score: number | null): string {
+  if (score === null) return "#666";
+  if (score > 60) return "#00ff88";
+  if (score >= 30) return "#ffaa00";
+  return "#ff3366";
 }
 
-function parseDataAvailability(json: string | null): DataAvail {
-  if (!json) return {};
-  try { return JSON.parse(json); } catch { return {}; }
+function edgeColor(edge: string): string {
+  switch (edge) {
+    case "POSITIVE": return "#00ff88";
+    case "NEGATIVE": return "#ff3366";
+    case "NEUTRAL": return "#ffaa00";
+    default: return "#666";
+  }
 }
 
-function DataAvailabilityBadges({ dataAvail }: { dataAvail: DataAvail }) {
-  const items: { key: string; label: string; available: boolean }[] = [
-    { key: "technical", label: "Técnicos", available: !!dataAvail.technical },
-    { key: "volume", label: "Volumen", available: !!dataAvail.volume },
-    { key: "patterns", label: "Patrones", available: !!dataAvail.patterns },
-    { key: "sentiment", label: "Sentimiento", available: !!dataAvail.sentiment },
-    { key: "news", label: "Noticias", available: !!dataAvail.news },
-    { key: "macro", label: "Macro", available: !!dataAvail.macro },
+function edgeLabel(edge: string): string {
+  switch (edge) {
+    case "POSITIVE": return "POSITIVO";
+    case "NEGATIVE": return "NEGATIVO";
+    case "NEUTRAL": return "NEUTRAL";
+    default: return "DESCONOCIDO";
+  }
+}
+
+function sampleLabel(adequacy: string): string {
+  switch (adequacy) {
+    case "INSUFFICIENT": return "INSUFICIENTE";
+    case "LOW": return "BAJA";
+    case "MEDIUM": return "MEDIA";
+    case "HIGH": return "ALTA";
+    default: return adequacy;
+  }
+}
+
+function detectCurrentSession(): { session: string; sessionEs: string; icon: React.ReactNode; nextSession: string; nextStart: string } {
+  const now = new Date();
+  const hourUtc = now.getUTCHours();
+  const minuteUtc = now.getUTCMinutes();
+  const timeInMinutes = hourUtc * 60 + minuteUtc;
+
+  if (timeInMinutes >= 12 * 60 && timeInMinutes < 16 * 60) {
+    return { session: "Overlap", sessionEs: "Solape Londres-NY", icon: <Flame className="size-5" />, nextSession: "Nueva York", nextStart: "16:00 UTC" };
+  }
+  if (timeInMinutes >= 7 * 60 && timeInMinutes < 12 * 60) {
+    return { session: "London", sessionEs: "Sesión de Londres", icon: <Sun className="size-5" />, nextSession: "Solape", nextStart: "12:00 UTC" };
+  }
+  if (timeInMinutes >= 16 * 60 && timeInMinutes < 21 * 60) {
+    return { session: "NewYork", sessionEs: "Sesión de Nueva York", icon: <Moon className="size-5" />, nextSession: "Asia", nextStart: "00:00 UTC" };
+  }
+  if (timeInMinutes < 7 * 60 || (timeInMinutes >= 8 * 60 && timeInMinutes < 9 * 60)) {
+    return { session: "Asia", sessionEs: "Sesión Asiática", icon: <Globe className="size-5" />, nextSession: "Londres", nextStart: "07:00 UTC" };
+  }
+  return { session: "OffHours", sessionEs: "Fuera de sesión", icon: <WifiOff className="size-5" />, nextSession: "Asia", nextStart: "00:00 UTC" };
+}
+
+function getNextSessionCountdown(): string {
+  const now = new Date();
+  const hourUtc = now.getUTCHours();
+  const minuteUtc = now.getUTCMinutes();
+  const timeInMinutes = hourUtc * 60 + minuteUtc;
+
+  const sessionStarts = [
+    { name: "Asia", start: 0 },
+    { name: "Londres", start: 7 * 60 },
+    { name: "Solape", start: 12 * 60 },
+    { name: "Nueva York", start: 16 * 60 },
   ];
 
+  let nextStart = 0;
+  for (const s of sessionStarts) {
+    if (s.start > timeInMinutes) {
+      nextStart = s.start;
+      break;
+    }
+    nextStart = 24 * 60; // next day Asia
+  }
+
+  const diff = nextStart - timeInMinutes;
+  const hours = Math.floor(diff / 60);
+  const mins = diff % 60;
+  return `${hours}h ${mins}m`;
+}
+
+// ─── Sub-Components ──────────────────────────────────────────────────────────
+
+function StatCard({ title, value, icon, color, subtitle }: {
+  title: string; value: string | number; icon: React.ReactNode; color: string; subtitle?: string;
+}) {
   return (
-    <div className="flex flex-wrap gap-1">
-      {items.map((item) => (
-        <span
-          key={item.key}
-          className={`text-[9px] px-1.5 py-0.5 rounded border ${
-            item.available
-              ? "bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20"
-              : "bg-[#ff3366]/10 text-[#ff3366]/60 border-[#ff3366]/20 line-through"
-          }`}
-        >
-          {item.available ? "✔" : "✘"} {item.label}
-        </span>
-      ))}
+    <motion.div initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }} transition={{ duration: 0.3 }}>
+      <Card className="bg-[#111827] border-white/10 hover:border-white/20 transition-colors">
+        <CardContent className="p-4">
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-white/50 text-xs font-medium uppercase tracking-wide">{title}</span>
+            <div style={{ color }}>{icon}</div>
+          </div>
+          <div className="text-2xl font-bold" style={{ color }}>{value}</div>
+          {subtitle && <div className="text-xs text-white/30 mt-1">{subtitle}</div>}
+        </CardContent>
+      </Card>
+    </motion.div>
+  );
+}
+
+function PatternBadge({ pattern }: { pattern: string | null }) {
+  if (!pattern) return <span className="text-white/30 text-xs">—</span>;
+  const name = PATTERN_NAMES[pattern] || pattern;
+  const icon = PATTERN_ICONS[pattern] || <CircleDot className="size-3" />;
+  return (
+    <Badge className="bg-[#aa66ff]/15 text-[#aa66ff] border-[#aa66ff]/30 text-[10px] px-1.5 py-0">
+      <span className="mr-1">{icon}</span>
+      {name}
+    </Badge>
+  );
+}
+
+function SessionBadge({ session }: { session: string | null }) {
+  if (!session) return <span className="text-white/30 text-xs">—</span>;
+  const name = SESSION_NAMES[session] || session;
+  const color = SESSION_COLORS[session] || "#666";
+  return (
+    <Badge className="text-[10px] px-1.5 py-0" style={{ backgroundColor: `${color}20`, color, borderColor: `${color}40` }}>
+      {name}
+    </Badge>
+  );
+}
+
+function SourceBadge({ source }: { source: string }) {
+  const config: Record<string, { bg: string; icon: React.ReactNode }> = {
+    AUTO: { bg: "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30", icon: <Bot className="size-3" /> },
+    AI: { bg: "bg-[#aa66ff]/15 text-[#aa66ff] border-[#aa66ff]/30", icon: <Sparkles className="size-3" /> },
+    MANUAL: { bg: "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30", icon: <Eye className="size-3" /> },
+  };
+  const c = config[source] || config.MANUAL;
+  return (
+    <Badge className={`${c.bg} text-[10px] px-1.5 py-0`}>
+      {c.icon}
+      <span className="ml-1">{source}</span>
+    </Badge>
+  );
+}
+
+function SetupScoreBar({ score }: { score: number | null }) {
+  if (score === null) return <span className="text-white/30 text-xs">—</span>;
+  const color = setupScoreColor(score);
+  return (
+    <div className="flex items-center gap-1.5">
+      <div className="w-12 h-1.5 bg-white/10 rounded-full overflow-hidden">
+        <div className="h-full rounded-full" style={{ width: `${score}%`, backgroundColor: color }} />
+      </div>
+      <span className="text-[10px] font-mono" style={{ color }}>{score.toFixed(0)}</span>
     </div>
   );
 }
 
-// ─── Component ───────────────────────────────────────────────────────────────
+function AnalysisModeBadge({ mode }: { mode: string | null }) {
+  const c = analysisModeConfig(mode);
+  return (
+    <Badge className={`${c.bg} text-[10px] px-1.5 py-0 border`}>
+      {c.label}
+    </Badge>
+  );
+}
+
+function ChartTooltip() {
+  return {
+    contentStyle: { background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px", fontSize: "12px" },
+    labelStyle: { color: "#fff" },
+  };
+}
+
+// ─── Main Component ──────────────────────────────────────────────────────────
 
 export default function TradingDashboard() {
-  const [activeTab, setActiveTab] = useState("dashboard");
+  const [activeTab, setActiveTab] = useState("motor");
 
   // Data state
   const [stats, setStats] = useState<Stats | null>(null);
   const [signals, setSignals] = useState<Signal[]>([]);
   const [alerts, setAlerts] = useState<Alert[]>([]);
   const [insights, setInsights] = useState<BacktestingInsights | null>(null);
+  const [setupScores, setSetupScores] = useState<SetupScoresResponse | null>(null);
+  const [autoTraderState, setAutoTraderState] = useState<AutoTraderState | null>(null);
+  const [autoTraderConfig, setAutoTraderConfig] = useState<AutoTraderConfig>({
+    enabled: false, assets: ["EUR/USD", "GBP/USD", "BTC/USD"], timeframe: "M5",
+    intervalMinutes: 5, minSetupScore: 30, maxConcurrentSignals: 10, confidenceBoost: 0, noOperarThreshold: 40,
+  });
   const [loading, setLoading] = useState<Record<string, boolean>>({});
+  const [liveFeed, setLiveFeed] = useState<Array<{ time: string; message: string; type: "success" | "skip" | "error" }>>([]);
 
   // Filter state
   const [filterDirection, setFilterDirection] = useState("ALL");
   const [filterAsset, setFilterAsset] = useState("ALL");
   const [filterTimeframe, setFilterTimeframe] = useState("ALL");
   const [filterStatus, setFilterStatus] = useState("ALL");
+  const [filterPattern, setFilterPattern] = useState("ALL");
+  const [filterSource, setFilterSource] = useState("ALL");
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
 
-  // Generate form state
-  const [genAsset, setGenAsset] = useState("EUR/USD");
-  const [genTimeframe, setGenTimeframe] = useState("M5");
-  const [genDirection, setGenDirection] = useState("HIGHER");
-  const [genConfidence, setGenConfidence] = useState(70);
-  const [genEntryPrice, setGenEntryPrice] = useState("1.08500");
-  const [genAiReason, setGenAiReason] = useState("");
-
-  // Manual form state
-  const [manualMode, setManualMode] = useState(false);
+  // Auto-trader config form
+  const [selectedAssets, setSelectedAssets] = useState<string[]>(["EUR/USD", "GBP/USD", "BTC/USD"]);
 
   // ─── Fetch functions ─────────────────────────────────────────────────────
 
@@ -305,9 +545,7 @@ export default function TradingDashboard() {
     try {
       const res = await fetch("/api/signals/stats");
       if (res.ok) setStats(await res.json());
-    } catch (err) {
-      console.error("Error fetching stats:", err);
-    }
+    } catch (err) { console.error("Error fetching stats:", err); }
   }, []);
 
   const fetchSignals = useCallback(async () => {
@@ -322,21 +560,17 @@ export default function TradingDashboard() {
       const res = await fetch(`/api/signals?${params}`);
       if (res.ok) {
         const data = await res.json();
-        setSignals(data.signals);
-        setTotalPages(data.pagination.totalPages);
+        setSignals(data.signals || []);
+        setTotalPages(data.pagination?.totalPages || 1);
       }
-    } catch (err) {
-      console.error("Error fetching signals:", err);
-    }
+    } catch (err) { console.error("Error fetching signals:", err); }
   }, [page, filterDirection, filterAsset, filterTimeframe, filterStatus]);
 
   const fetchAlerts = useCallback(async () => {
     try {
       const res = await fetch("/api/signals/alerts");
       if (res.ok) setAlerts(await res.json());
-    } catch (err) {
-      console.error("Error fetching alerts:", err);
-    }
+    } catch (err) { console.error("Error fetching alerts:", err); }
   }, []);
 
   const fetchInsights = useCallback(async () => {
@@ -344,11 +578,29 @@ export default function TradingDashboard() {
     try {
       const res = await fetch("/api/signals/backtesting");
       if (res.ok) setInsights(await res.json());
-    } catch (err) {
-      console.error("Error fetching insights:", err);
-    } finally {
-      setLoading((p) => ({ ...p, backtesting: false }));
-    }
+    } catch (err) { console.error("Error fetching insights:", err); }
+    finally { setLoading((p) => ({ ...p, backtesting: false })); }
+  }, []);
+
+  const fetchSetupScores = useCallback(async () => {
+    try {
+      const res = await fetch("/api/setup-scores");
+      if (res.ok) setSetupScores(await res.json());
+    } catch (err) { console.error("Error fetching setup scores:", err); }
+  }, []);
+
+  const fetchAutoTrader = useCallback(async () => {
+    try {
+      const res = await fetch("/api/auto-trader");
+      if (res.ok) {
+        const data = await res.json();
+        setAutoTraderState(data.state);
+        if (data.config) {
+          setAutoTraderConfig(data.config);
+          if (data.config.assets) setSelectedAssets(data.config.assets);
+        }
+      }
+    } catch (err) { console.error("Error fetching auto-trader:", err); }
   }, []);
 
   // ─── Effects ─────────────────────────────────────────────────────────────
@@ -356,15 +608,17 @@ export default function TradingDashboard() {
   useEffect(() => {
     fetchStats();
     fetchAlerts();
-  }, [fetchStats, fetchAlerts]);
+    fetchAutoTrader();
+    fetchSetupScores();
+  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores]);
 
-  useEffect(() => {
-    fetchSignals();
-  }, [fetchSignals]);
+  useEffect(() => { fetchSignals(); }, [fetchSignals]);
 
   useEffect(() => {
     if (activeTab === "backtesting" && !insights) fetchInsights();
-  }, [activeTab, insights, fetchInsights]);
+    if (activeTab === "setup-scores") fetchSetupScores();
+    if (activeTab === "auto-trader") fetchAutoTrader();
+  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader]);
 
   // Auto-refresh every 10 seconds
   useEffect(() => {
@@ -372,63 +626,73 @@ export default function TradingDashboard() {
       fetchStats();
       fetchAlerts();
       if (activeTab === "historial") fetchSignals();
+      if (activeTab === "auto-trader" || activeTab === "motor") fetchAutoTrader();
+      if (activeTab === "setup-scores") fetchSetupScores();
     }, 10000);
     return () => clearInterval(interval);
-  }, [fetchStats, fetchAlerts, fetchSignals, activeTab]);
+  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, activeTab]);
 
   // ─── Handlers ────────────────────────────────────────────────────────────
 
-  const handleGenerateAI = async () => {
-    setLoading((p) => ({ ...p, generate: true }));
+  const handleToggleAutoTrader = async (start: boolean) => {
+    setLoading((p) => ({ ...p, autoTrader: true }));
     try {
-      const res = await fetch("/api/signals/generate", {
+      const res = await fetch("/api/auto-trader", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ asset: genAsset, timeframe: genTimeframe }),
+        body: JSON.stringify({
+          action: start ? "start" : "stop",
+          config: { ...autoTraderConfig, assets: selectedAssets, enabled: start },
+        }),
+      });
+      if (res.ok) {
+        await fetchAutoTrader();
+        addLiveFeed(start ? "Auto-Trader INICIADO" : "Auto-Trader DETENIDO", start ? "success" : "skip");
+      }
+    } catch (err) { console.error("Error toggling auto-trader:", err); }
+    finally { setLoading((p) => ({ ...p, autoTrader: false })); }
+  };
+
+  const handleRunCycle = async () => {
+    setLoading((p) => ({ ...p, runCycle: true }));
+    try {
+      const res = await fetch("/api/auto-trader", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "run-cycle" }),
       });
       if (res.ok) {
         const data = await res.json();
-        setGenAiReason(data.signal?.aiReason || "Señal generada");
+        addLiveFeed(`Ciclo ejecutado: ${data.signalsGenerated} generadas, ${data.signalsSkipped} omitidas`, "success");
+        fetchAutoTrader();
         fetchStats();
         fetchSignals();
-        fetchAlerts();
+        fetchSetupScores();
       }
-    } catch (err) {
-      console.error("Error generating signal:", err);
-    } finally {
-      setLoading((p) => ({ ...p, generate: false }));
-    }
+    } catch (err) { console.error("Error running cycle:", err); addLiveFeed("Error ejecutando ciclo", "error"); }
+    finally { setLoading((p) => ({ ...p, runCycle: false })); }
   };
 
-  const handleCreateManual = async () => {
-    setLoading((p) => ({ ...p, manual: true }));
+  const handleUpdateConfig = async () => {
     try {
-      const body = {
-        asset: genAsset,
-        timeframe: genTimeframe,
-        direction: genDirection,
-        entryPrice: parseFloat(genEntryPrice),
-        entryTime: new Date().toISOString(),
-        expirationMinutes: EXP_MAP[genTimeframe] || 5,
-        confidence: genConfidence,
-        aiReason: genAiReason || "Señal manual",
-      };
-      const res = await fetch("/api/signals", {
+      await fetch("/api/auto-trader", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
+        body: JSON.stringify({
+          action: "update-config",
+          config: { ...autoTraderConfig, assets: selectedAssets },
+        }),
       });
-      if (res.ok) {
-        fetchStats();
-        fetchSignals();
-        fetchAlerts();
-        setGenAiReason("");
-      }
-    } catch (err) {
-      console.error("Error creating manual signal:", err);
-    } finally {
-      setLoading((p) => ({ ...p, manual: false }));
-    }
+      fetchAutoTrader();
+      addLiveFeed("Configuración actualizada", "success");
+    } catch (err) { console.error("Error updating config:", err); }
+  };
+
+  const handleCheckPending = async () => {
+    try {
+      await fetch("/api/signals/check-pending", { method: "POST" });
+      fetchStats(); fetchSignals(); fetchAlerts(); fetchSetupScores();
+    } catch (err) { console.error("Error checking pending:", err); }
   };
 
   const handleDismissAlert = async (id: string) => {
@@ -439,55 +703,59 @@ export default function TradingDashboard() {
         body: JSON.stringify({ id }),
       });
       fetchAlerts();
-    } catch (err) {
-      console.error("Error dismissing alert:", err);
-    }
+    } catch (err) { console.error("Error dismissing alert:", err); }
   };
 
   const handleCancelSignal = async (id: string) => {
     try {
       await fetch(`/api/signals/${id}`, { method: "DELETE" });
-      fetchSignals();
-      fetchStats();
-    } catch (err) {
-      console.error("Error cancelling signal:", err);
-    }
+      fetchSignals(); fetchStats();
+    } catch (err) { console.error("Error cancelling signal:", err); }
   };
 
-  const handleCheckPending = async () => {
+  const handleSeedData = async () => {
+    setLoading((p) => ({ ...p, seed: true }));
     try {
-      await fetch("/api/signals/check-pending", { method: "POST" });
-      fetchStats();
-      fetchSignals();
-      fetchAlerts();
-    } catch (err) {
-      console.error("Error checking pending:", err);
-    }
+      await fetch("/api/market-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "seed" }),
+      });
+      addLiveFeed("Datos de mercado generados", "success");
+    } catch (err) { console.error("Error seeding data:", err); }
+    finally { setLoading((p) => ({ ...p, seed: false })); }
   };
+
+  const addLiveFeed = useCallback((message: string, type: "success" | "skip" | "error") => {
+    setLiveFeed((prev) => [
+      { time: new Date().toLocaleTimeString("es-ES"), message, type },
+      ...prev.slice(0, 49),
+    ]);
+  }, []);
 
   // ─── Chart Data ──────────────────────────────────────────────────────────
 
   const assetChartData = stats
     ? Object.entries(stats.winRateByAsset).map(([asset, data]) => ({
-        name: asset,
-        winRate: Math.round(data.rate),
-        total: data.total,
+        name: asset, winRate: Math.round(data.rate), total: data.total,
       }))
     : [];
 
   const timeframeChartData = stats
     ? Object.entries(stats.winRateByTimeframe).map(([tf, data]) => ({
-        name: tf,
-        winRate: Math.round(data.rate),
-        total: data.total,
+        name: tf, winRate: Math.round(data.rate), total: data.total,
       }))
     : [];
 
-  const directionChartData = stats
-    ? Object.entries(stats.winRateByDirection).map(([dir, data]) => ({
-        name: dir,
-        winRate: Math.round(data.rate),
-        total: data.total,
+  const patternChartData = stats
+    ? Object.entries(stats.winRateByPattern).map(([p, data]) => ({
+        name: PATTERN_NAMES[p] || p, winRate: Math.round(data.rate), total: data.total,
+      }))
+    : [];
+
+  const sessionChartData = stats
+    ? Object.entries(stats.winRateBySession).map(([s, data]) => ({
+        name: SESSION_NAMES[s] || s, winRate: Math.round(data.rate), total: data.total,
       }))
     : [];
 
@@ -504,6 +772,15 @@ export default function TradingDashboard() {
 
   const confidenceChartData = insights?.confidenceAnalysis.filter((c) => c.total > 0) || [];
 
+  const currentSession = detectCurrentSession();
+  const nextCountdown = getNextSessionCountdown();
+
+  const totalDecisive = stats ? stats.winCount + stats.lossCount : 0;
+  const datasetGoal = 1000;
+  const datasetProgress = Math.min(100, ((totalDecisive || 0) / datasetGoal) * 100);
+  const reliabilityLevel = stats?.statisticalReliability || "INSUFFICIENT";
+  const reliabilityConfig_ = reliabilityConfig(reliabilityLevel);
+
   // ─── Render ──────────────────────────────────────────────────────────────
 
   return (
@@ -512,28 +789,28 @@ export default function TradingDashboard() {
       <header className="border-b border-white/10 bg-[#0d1220]/90 backdrop-blur-sm sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-[#00ff88] to-[#00aaff] flex items-center justify-center">
+            <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-[#00ff88] to-[#00aaff] flex items-center justify-center">
               <Activity className="size-5 text-[#0a0e17]" />
             </div>
             <div>
               <h1 className="text-lg font-bold tracking-tight">SignalTrader Pro</h1>
-              <p className="text-xs text-white/40">Trading Signals Dashboard</p>
+              <p className="text-[10px] text-white/40">Motor Estadístico de Trading</p>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={handleCheckPending}
-              className="text-white/60 hover:text-white hover:bg-white/10"
-            >
-              <RefreshCw className="size-4 mr-1" />
-              Check
+            {autoTraderState?.isRunning && (
+              <motion.div animate={{ opacity: [1, 0.3, 1] }} transition={{ duration: 2, repeat: Infinity }}>
+                <Badge className="bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/40">
+                  <Bot className="size-3 mr-1" /> AUTO ON
+                </Badge>
+              </motion.div>
+            )}
+            <Button variant="ghost" size="sm" onClick={handleCheckPending} className="text-white/60 hover:text-white hover:bg-white/10">
+              <RefreshCw className="size-4 mr-1" /> Verificar
             </Button>
             {alerts.length > 0 && (
               <Badge className="bg-[#ff3366]/20 text-[#ff3366] border border-[#ff3366]/40 animate-pulse">
-                <Bell className="size-3 mr-1" />
-                {alerts.length}
+                <Bell className="size-3 mr-1" /> {alerts.length}
               </Badge>
             )}
           </div>
@@ -543,290 +820,248 @@ export default function TradingDashboard() {
       {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 py-4">
         <Tabs value={activeTab} onValueChange={setActiveTab}>
-          <TabsList className="bg-[#111827] border border-white/10 w-full justify-start overflow-x-auto">
-            <TabsTrigger value="dashboard" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88]">
-              <BarChart3 className="size-4 mr-1" />
-              Dashboard
-            </TabsTrigger>
-            <TabsTrigger value="historial" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88]">
-              <Clock className="size-4 mr-1" />
-              Historial
-            </TabsTrigger>
-            <TabsTrigger value="generar" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88]">
-              <Zap className="size-4 mr-1" />
-              Generar
-            </TabsTrigger>
-            <TabsTrigger value="backtesting" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88]">
-              <Brain className="size-4 mr-1" />
-              Backtesting
-            </TabsTrigger>
-            <TabsTrigger value="alertas" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88]">
-              <Bell className="size-4 mr-1" />
-              Alertas
-            </TabsTrigger>
-          </TabsList>
+          <ScrollArea className="w-full">
+            <TabsList className="bg-[#111827] border border-white/10 w-max min-w-full justify-start">
+              <TabsTrigger value="motor" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Gauge className="size-3.5 mr-1" /> Motor Estadístico
+              </TabsTrigger>
+              <TabsTrigger value="historial" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Clock className="size-3.5 mr-1" /> Historial
+              </TabsTrigger>
+              <TabsTrigger value="setup-scores" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Target className="size-3.5 mr-1" /> Setup Scores
+              </TabsTrigger>
+              <TabsTrigger value="patrones" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Layers className="size-3.5 mr-1" /> Patrones
+              </TabsTrigger>
+              <TabsTrigger value="auto-trader" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Bot className="size-3.5 mr-1" /> Auto-Trader
+              </TabsTrigger>
+              <TabsTrigger value="backtesting" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Brain className="size-3.5 mr-1" /> Backtesting
+              </TabsTrigger>
+              <TabsTrigger value="alertas" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Bell className="size-3.5 mr-1" /> Alertas
+              </TabsTrigger>
+            </TabsList>
+          </ScrollArea>
 
-          {/* ─── DASHBOARD TAB ──────────────────────────────────────────────── */}
-          <TabsContent value="dashboard">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 mt-4"
-            >
-              {/* Stats Cards */}
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
-                <StatCard
-                  title="Total Señales"
-                  value={stats?.totalSignals || 0}
-                  icon={<Activity className="size-5" />}
-                  color="#00aaff"
-                />
-                <StatCard
-                  title="Win Rate"
-                  value={`${stats?.winRate.toFixed(1) || 0}%`}
-                  icon={<Target className="size-5" />}
-                  color={stats && stats.winRate >= 60 ? "#00ff88" : "#ff3366"}
-                />
-                <StatCard
-                  title="Profit Factor"
-                  value={stats?.profitFactor === -1 ? "∞" : (stats?.profitFactor || 0).toString()}
-                  icon={<TrendingUp className="size-5" />}
-                  color={stats && stats.profitFactor >= 1.5 ? "#00ff88" : "#ffcc00"}
-                />
-                <StatCard
-                  title="WIN"
-                  value={stats?.winCount || 0}
-                  icon={<CheckCircle className="size-5" />}
-                  color="#00ff88"
-                />
-                <StatCard
-                  title="LOSS"
-                  value={stats?.lossCount || 0}
-                  icon={<XCircle className="size-5" />}
-                  color="#ff3366"
-                />
-                <StatCard
-                  title="Pendientes"
-                  value={stats?.pendingCount || 0}
-                  icon={<Clock className="size-5" />}
-                  color="#ffcc00"
-                />
+          {/* ─── TAB 1: MOTOR ESTADÍSTICO ──────────────────────────────────── */}
+          <TabsContent value="motor">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* Session Banner */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-full flex items-center justify-center" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session] }}>
+                        {currentSession.icon}
+                      </div>
+                      <div>
+                        <div className="text-sm font-semibold" style={{ color: SESSION_COLORS[currentSession.session] }}>
+                          {currentSession.sessionEs}
+                        </div>
+                        <div className="text-xs text-white/40">Sesión actual</div>
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-4">
+                      <div className="text-right">
+                        <div className="text-xs text-white/40">Próxima sesión</div>
+                        <div className="text-sm font-medium text-white/70">{currentSession.nextSession} — {currentSession.nextStart}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="text-xs text-white/40">Cuenta atrás</div>
+                        <div className="text-sm font-mono" style={{ color: NEON_CYAN }}>{nextCountdown}</div>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Auto-Trader Control Panel */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-white text-sm flex items-center gap-2">
+                    <Bot className="size-4 text-[#00ff88]" /> Auto-Trader
+                    {autoTraderState?.isRunning ? (
+                      <Badge className="bg-[#00ff88]/20 text-[#00ff88] border-[#00ff88]/40 text-[10px]">EN EJECUCIÓN</Badge>
+                    ) : (
+                      <Badge className="bg-[#ff3366]/20 text-[#ff3366] border-[#ff3366]/40 text-[10px]">DETENIDO</Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <motion.div whileTap={{ scale: 0.95 }}>
+                      <Button
+                        onClick={() => handleToggleAutoTrader(!autoTraderState?.isRunning)}
+                        disabled={loading.autoTrader}
+                        className={autoTraderState?.isRunning
+                          ? "bg-[#ff3366] hover:bg-[#ff3366]/80 text-white font-bold px-6"
+                          : "bg-[#00ff88] hover:bg-[#00ff88]/80 text-[#0a0e17] font-bold px-6"}
+                      >
+                        {loading.autoTrader ? <Loader2 className="size-4 mr-2 animate-spin" /> :
+                          autoTraderState?.isRunning ? <><Square className="size-4 mr-2" /> DETENER</> : <><Play className="size-4 mr-2" /> INICIAR</>
+                        }
+                      </Button>
+                    </motion.div>
+                    <Button variant="outline" size="sm" onClick={handleRunCycle} disabled={loading.runCycle} className="border-white/20 text-white/70 hover:text-white hover:bg-white/10">
+                      {loading.runCycle ? <Loader2 className="size-3 mr-1 animate-spin" /> : <Zap className="size-3 mr-1" />} Ejecutar Ciclo
+                    </Button>
+                    <div className="flex gap-4 text-xs text-white/50">
+                      <span>Generadas: <b className="text-white">{autoTraderState?.totalGenerated || 0}</b></span>
+                      <span>Verificadas: <b className="text-white">{autoTraderState?.totalVerified || 0}</b></span>
+                      <span>Pendientes: <b className="text-[#ffaa00]">{autoTraderState?.currentPending || 0}</b></span>
+                      <span>Último check: <b className="text-white">{autoTraderState?.lastCheck ? formatTime(autoTraderState.lastCheck) : "—"}</b></span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* KPI Cards */}
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <StatCard title="Total Señales" value={stats?.totalSignals || 0} icon={<Activity className="size-5" />} color={NEON_BLUE} />
+                <StatCard title="Win Rate" value={`${stats?.winRate.toFixed(1) || 0}%`} icon={<Target className="size-5" />} color={stats && stats.winRate >= 60 ? NEON_GREEN : NEON_RED} />
+                <StatCard title="Profit Factor" value={stats?.profitFactor === -1 ? "∞" : (stats?.profitFactor || 0).toFixed(2)} icon={<TrendingUp className="size-5" />} color={stats && stats.profitFactor >= 1.5 ? NEON_GREEN : NEON_YELLOW} />
+                <StatCard title="Pendientes" value={stats?.pendingCount || 0} icon={<Clock className="size-5" />} color={NEON_YELLOW} />
+                <StatCard title="NO OPERAR" value={stats?.noOperarCount || 0} icon={<Shield className="size-5" />} color={NEON_BLUE} />
+                <StatCard title="Muestra" value={totalDecisive} icon={<Database className="size-5" />} color={totalDecisive >= 100 ? NEON_GREEN : totalDecisive >= 30 ? NEON_YELLOW : NEON_RED} />
               </div>
 
-              {/* Consecutive Stats */}
-              {stats && (stats.currentConsecutiveWins > 0 || stats.currentConsecutiveLosses > 0) && (
-                <div className="flex gap-3">
-                  {stats.currentConsecutiveWins > 0 && (
-                    <Badge className="bg-[#00ff88]/15 text-[#00ff88] border border-[#00ff88]/30 py-1 px-3">
-                      <TrendingUp className="size-3 mr-1" />
-                      {stats.currentConsecutiveWins} victorias consecutivas
-                    </Badge>
+              {/* Statistical Reliability Banner */}
+              <Card className={`border ${reliabilityLevel === "HIGH" ? "bg-[#00ff88]/5 border-[#00ff88]/20" : reliabilityLevel === "MEDIUM" ? "bg-[#ffaa00]/5 border-[#ffaa00]/20" : reliabilityLevel === "LOW" ? "bg-[#ff8800]/5 border-[#ff8800]/20" : "bg-[#ff3366]/5 border-[#ff3366]/20"}`}>
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                      <AlertTriangle className="size-5" style={{ color: reliabilityConfig_.color }} />
+                      <div>
+                        <div className="text-sm font-semibold" style={{ color: reliabilityConfig_.color }}>
+                          Confiabilidad Estadística: {reliabilityConfig_.label}
+                        </div>
+                        <div className="text-xs text-white/40">{totalDecisive} señales decisivas de {datasetGoal} necesarias</div>
+                      </div>
+                    </div>
+                    <div className="w-48">
+                      <Progress value={datasetProgress} className="h-2" />
+                      <div className="text-[10px] text-white/30 mt-1 text-right">{datasetProgress.toFixed(0)}%</div>
+                    </div>
+                  </div>
+                  <p className="text-xs text-white/50 mt-2 italic">
+                    Sigue recolectando datos. El dataset es tu activo más valioso.
+                  </p>
+                </CardContent>
+              </Card>
+
+              {/* Dataset Progress Bar */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-xs text-white/50">Progreso del Dataset hacia {datasetGoal} señales</span>
+                    <span className="text-xs font-mono" style={{ color: reliabilityConfig_.color }}>{totalDecisive}/{datasetGoal}</span>
+                  </div>
+                  <div className="w-full h-3 bg-white/5 rounded-full overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full"
+                      initial={{ width: 0 }}
+                      animate={{ width: `${datasetProgress}%` }}
+                      transition={{ duration: 1, ease: "easeOut" }}
+                      style={{
+                        background: `linear-gradient(90deg, ${totalDecisive >= 500 ? NEON_GREEN : totalDecisive >= 100 ? NEON_YELLOW : totalDecisive >= 30 ? "#ff8800" : NEON_RED}, ${totalDecisive >= 500 ? "#00ffcc" : totalDecisive >= 100 ? "#ffcc00" : "#ff4488"})`,
+                      }}
+                    />
+                  </div>
+                  <div className="flex justify-between mt-1">
+                    <span className="text-[9px] text-[#ff3366]/60">30 = LOW</span>
+                    <span className="text-[9px] text-[#ff8800]/60">100 = MEDIUM</span>
+                    <span className="text-[9px] text-[#ffaa00]/60">500 = HIGH</span>
+                    <span className="text-[9px] text-[#00ff88]/60">1000+ = VERY HIGH</span>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Recent Auto Signals */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-white text-sm flex items-center gap-2">
+                    <Bot className="size-4 text-[#aa66ff]" /> Últimas Señales Auto
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {autoTraderState?.recentSignals && autoTraderState.recentSignals.length > 0 ? (
+                    <div className="space-y-2">
+                      {autoTraderState.recentSignals.slice(0, 5).map((s) => (
+                        <div key={s.id} className="flex items-center justify-between p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                          <div className="flex items-center gap-2">
+                            {directionIcon(s.direction)}
+                            <span className="text-xs font-medium text-white">{s.asset}</span>
+                            <PatternBadge pattern={s.pattern} />
+                          </div>
+                          <div className="flex items-center gap-3">
+                            <span className="text-[10px] text-white/40">Conf: {s.confidence.toFixed(0)}%</span>
+                            <SetupScoreBar score={s.setupScore} />
+                            <Badge className={`${s.status === "PENDING" ? "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30" : "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30"} text-[10px]`}>
+                              {s.status}
+                            </Badge>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-white/30 text-xs text-center py-4">No hay señales auto generadas aún. Inicia el Auto-Trader.</p>
                   )}
-                  {stats.currentConsecutiveLosses > 0 && (
-                    <Badge className="bg-[#ff3366]/15 text-[#ff3366] border border-[#ff3366]/30 py-1 px-3">
-                      <TrendingDown className="size-3 mr-1" />
-                      {stats.currentConsecutiveLosses} pérdidas consecutivas
-                    </Badge>
-                  )}
-                </div>
-              )}
+                </CardContent>
+              </Card>
 
               {/* Charts Row */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* Weekly Performance */}
                 <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm">Rendimiento Semanal</CardTitle>
-                  </CardHeader>
+                  <CardHeader><CardTitle className="text-white text-sm">Rendimiento Semanal</CardTitle></CardHeader>
                   <CardContent>
                     {weeklyData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height={220}>
+                      <ResponsiveContainer width="100%" height={200}>
                         <BarChart data={weeklyData}>
                           <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                          <XAxis dataKey="week" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                          <RechartsTooltip
-                            contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                            labelStyle={{ color: "#fff" }}
-                          />
+                          <XAxis dataKey="week" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} />
+                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} />
+                          <RechartsTooltip {...ChartTooltip()} />
                           <Bar dataKey="wins" fill={NEON_GREEN} radius={[4, 4, 0, 0]} />
                           <Bar dataKey="losses" fill={NEON_RED} radius={[4, 4, 0, 0]} />
                         </BarChart>
                       </ResponsiveContainer>
-                    ) : (
-                      <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">
-                        Sin datos suficientes
-                      </div>
-                    )}
+                    ) : <div className="h-[200px] flex items-center justify-center text-white/30 text-sm">Sin datos suficientes</div>}
                   </CardContent>
                 </Card>
 
-                {/* Result Distribution */}
                 <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm">Distribución de Resultados</CardTitle>
-                  </CardHeader>
+                  <CardHeader><CardTitle className="text-white text-sm">Distribución de Resultados</CardTitle></CardHeader>
                   <CardContent>
                     {resultPieData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height={220}>
+                      <ResponsiveContainer width="100%" height={200}>
                         <PieChart>
-                          <Pie
-                            data={resultPieData}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={55}
-                            outerRadius={85}
-                            paddingAngle={3}
-                            dataKey="value"
-                          >
-                            {resultPieData.map((entry, index) => (
-                              <Cell key={`cell-${index}`} fill={entry.color} />
-                            ))}
+                          <Pie data={resultPieData} cx="50%" cy="50%" innerRadius={50} outerRadius={80} paddingAngle={3} dataKey="value">
+                            {resultPieData.map((entry, index) => (<Cell key={`cell-${index}`} fill={entry.color} />))}
                           </Pie>
-                          <Legend
-                            formatter={(value: string) => <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 12 }}>{value}</span>}
-                          />
-                          <RechartsTooltip
-                            contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                          />
+                          <Legend formatter={(value: string) => <span style={{ color: "rgba(255,255,255,0.7)", fontSize: 11 }}>{value}</span>} />
+                          <RechartsTooltip {...ChartTooltip()} />
                         </PieChart>
                       </ResponsiveContainer>
-                    ) : (
-                      <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">
-                        Sin datos suficientes
-                      </div>
-                    )}
+                    ) : <div className="h-[200px] flex items-center justify-center text-white/30 text-sm">Sin datos suficientes</div>}
                   </CardContent>
                 </Card>
               </div>
-
-              {/* Second Charts Row */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* Win Rate by Asset */}
-                <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm">Win Rate por Activo</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {assetChartData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height={220}>
-                        <BarChart data={assetChartData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                          <XAxis dataKey="name" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} domain={[0, 100]} />
-                          <RechartsTooltip
-                            contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                            labelStyle={{ color: "#fff" }}
-                          />
-                          <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                            {assetChartData.map((entry, index) => (
-                              <Cell
-                                key={`cell-${index}`}
-                                fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED}
-                              />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">
-                        Sin datos suficientes
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-
-                {/* Win Rate by Timeframe */}
-                <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm">Win Rate por Temporalidad</CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    {timeframeChartData.length > 0 ? (
-                      <ResponsiveContainer width="100%" height={220}>
-                        <BarChart data={timeframeChartData}>
-                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                          <XAxis dataKey="name" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} domain={[0, 100]} />
-                          <RechartsTooltip
-                            contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                            labelStyle={{ color: "#fff" }}
-                          />
-                          <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                            {timeframeChartData.map((entry, index) => (
-                              <Cell
-                                key={`cell-${index}`}
-                                fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED}
-                              />
-                            ))}
-                          </Bar>
-                        </BarChart>
-                      </ResponsiveContainer>
-                    ) : (
-                      <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">
-                        Sin datos suficientes
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-
-              {/* Active Alerts Panel */}
-              {alerts.length > 0 && (
-                <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm flex items-center gap-2">
-                      <AlertTriangle className="size-4 text-[#ffcc00]" />
-                      Alertas Activas ({alerts.length})
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent>
-                    <div className="space-y-2">
-                      {alerts.map((alert) => (
-                        <div
-                          key={alert.id}
-                          className={`flex items-center justify-between p-3 rounded-lg border ${severityColor(alert.severity)}`}
-                        >
-                          <div className="flex items-center gap-2">
-                            {alert.severity === "critical" ? (
-                              <XCircle className="size-4" />
-                            ) : (
-                              <AlertTriangle className="size-4" />
-                            )}
-                            <span className="text-sm">{alert.message}</span>
-                          </div>
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            onClick={() => handleDismissAlert(alert.id)}
-                            className="text-white/50 hover:text-white hover:bg-white/10 h-7"
-                          >
-                            Descartar
-                          </Button>
-                        </div>
-                      ))}
-                    </div>
-                  </CardContent>
-                </Card>
-              )}
             </motion.div>
           </TabsContent>
 
-          {/* ─── HISTORIAL TAB ──────────────────────────────────────────────── */}
+          {/* ─── TAB 2: HISTORIAL ──────────────────────────────────────────── */}
           <TabsContent value="historial">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 mt-4"
-            >
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
               {/* Filters */}
               <Card className="bg-[#111827] border-white/10">
                 <CardContent className="pt-4 pb-4">
-                  <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-2">
                     <Select value={filterStatus} onValueChange={(v) => { setFilterStatus(v); setPage(1); }}>
-                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
-                        <SelectValue placeholder="Estado" />
-                      </SelectTrigger>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Estado" /></SelectTrigger>
                       <SelectContent className="bg-[#111827] border-white/10">
                         <SelectItem value="ALL">Todos</SelectItem>
                         <SelectItem value="PENDING">Pendiente</SelectItem>
@@ -835,9 +1070,7 @@ export default function TradingDashboard() {
                       </SelectContent>
                     </Select>
                     <Select value={filterDirection} onValueChange={(v) => { setFilterDirection(v); setPage(1); }}>
-                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
-                        <SelectValue placeholder="Dirección" />
-                      </SelectTrigger>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Dirección" /></SelectTrigger>
                       <SelectContent className="bg-[#111827] border-white/10">
                         <SelectItem value="ALL">Todas</SelectItem>
                         <SelectItem value="HIGHER">HIGHER</SelectItem>
@@ -846,32 +1079,36 @@ export default function TradingDashboard() {
                       </SelectContent>
                     </Select>
                     <Select value={filterAsset} onValueChange={(v) => { setFilterAsset(v); setPage(1); }}>
-                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
-                        <SelectValue placeholder="Activo" />
-                      </SelectTrigger>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Activo" /></SelectTrigger>
                       <SelectContent className="bg-[#111827] border-white/10">
                         <SelectItem value="ALL">Todos</SelectItem>
-                        {ASSETS.map((a) => (
-                          <SelectItem key={a} value={a}>{a}</SelectItem>
-                        ))}
+                        {ASSETS.map((a) => (<SelectItem key={a} value={a}>{a}</SelectItem>))}
                       </SelectContent>
                     </Select>
                     <Select value={filterTimeframe} onValueChange={(v) => { setFilterTimeframe(v); setPage(1); }}>
-                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
-                        <SelectValue placeholder="Temporalidad" />
-                      </SelectTrigger>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Temporalidad" /></SelectTrigger>
                       <SelectContent className="bg-[#111827] border-white/10">
                         <SelectItem value="ALL">Todas</SelectItem>
-                        {TIMEFRAMES.map((t) => (
-                          <SelectItem key={t} value={t}>{t}</SelectItem>
-                        ))}
+                        {TIMEFRAMES.map((t) => (<SelectItem key={t} value={t}>{t}</SelectItem>))}
                       </SelectContent>
                     </Select>
-                    <Button
-                      variant="outline"
-                      onClick={() => { setFilterStatus("ALL"); setFilterDirection("ALL"); setFilterAsset("ALL"); setFilterTimeframe("ALL"); setPage(1); }}
-                      className="bg-[#0a0e17] border-white/10 text-white/70 hover:text-white hover:bg-white/10 text-xs"
-                    >
+                    <Select value={filterPattern} onValueChange={(v) => { setFilterPattern(v); setPage(1); }}>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Patrón" /></SelectTrigger>
+                      <SelectContent className="bg-[#111827] border-white/10">
+                        <SelectItem value="ALL">Todos</SelectItem>
+                        {PATTERN_TYPES.map((p) => (<SelectItem key={p} value={p}>{PATTERN_NAMES[p]}</SelectItem>))}
+                      </SelectContent>
+                    </Select>
+                    <Select value={filterSource} onValueChange={(v) => { setFilterSource(v); setPage(1); }}>
+                      <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs"><SelectValue placeholder="Fuente" /></SelectTrigger>
+                      <SelectContent className="bg-[#111827] border-white/10">
+                        <SelectItem value="ALL">Todas</SelectItem>
+                        <SelectItem value="AUTO">AUTO</SelectItem>
+                        <SelectItem value="AI">AI</SelectItem>
+                        <SelectItem value="MANUAL">MANUAL</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <Button variant="outline" onClick={() => { setFilterStatus("ALL"); setFilterDirection("ALL"); setFilterAsset("ALL"); setFilterTimeframe("ALL"); setFilterPattern("ALL"); setFilterSource("ALL"); setPage(1); }} className="bg-[#0a0e17] border-white/10 text-white/70 hover:text-white hover:bg-white/10 text-xs">
                       Limpiar
                     </Button>
                   </div>
@@ -885,115 +1122,63 @@ export default function TradingDashboard() {
                     <Table>
                       <TableHeader>
                         <TableRow className="border-white/10 hover:bg-transparent">
-                          <TableHead className="text-white/50 text-xs">Hora</TableHead>
-                          <TableHead className="text-white/50 text-xs">Activo</TableHead>
-                          <TableHead className="text-white/50 text-xs">TF</TableHead>
-                          <TableHead className="text-white/50 text-xs">Dir.</TableHead>
-                          <TableHead className="text-white/50 text-xs">Entrada</TableHead>
-                          <TableHead className="text-white/50 text-xs">Salida</TableHead>
-                          <TableHead className="text-white/50 text-xs">Conf.</TableHead>
-                          <TableHead className="text-white/50 text-xs">Resultado</TableHead>
-                          <TableHead className="text-white/50 text-xs">Modo</TableHead>
-                          <TableHead className="text-white/50 text-xs">Confiab.</TableHead>
-                          <TableHead className="text-white/50 text-xs">Dif.</TableHead>
-                          <TableHead className="text-white/50 text-xs">Razón IA</TableHead>
-                          <TableHead className="text-white/50 text-xs">Acción</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Hora</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Activo</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">TF</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Dir.</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Entrada</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Resultado</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Setup</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Fuente</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Modo</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Acción</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
-                        <AnimatePresence>
-                          {signals.length === 0 ? (
-                            <TableRow>
-                              <TableCell colSpan={13} className="text-center text-white/30 py-8">
-                                No hay señales registradas
+                        {signals.length === 0 ? (
+                          <TableRow>
+                            <TableCell colSpan={12} className="text-center text-white/30 py-8 text-sm">No hay señales registradas</TableCell>
+                          </TableRow>
+                        ) : (
+                          signals
+                            .filter(s => filterPattern === "ALL" || s.patternType === filterPattern)
+                            .filter(s => filterSource === "ALL" || s.source === filterSource)
+                            .map((signal) => (
+                            <TableRow key={signal.id} className="border-white/5 hover:bg-white/5">
+                              <TableCell className="text-white/70 text-[10px] whitespace-nowrap">{formatTime(signal.entryTime)}</TableCell>
+                              <TableCell className="text-white text-[10px] font-medium">{signal.asset}</TableCell>
+                              <TableCell className="text-white/70 text-[10px]">{signal.timeframe}</TableCell>
+                              <TableCell>
+                                <div className="flex items-center gap-1">
+                                  {directionIcon(signal.direction)}
+                                  <span className={`text-[10px] ${signal.direction === "HIGHER" ? "text-[#00ff88]" : signal.direction === "LOWER" ? "text-[#ff3366]" : "text-[#00aaff]"}`}>
+                                    {signal.direction}
+                                  </span>
+                                </div>
+                              </TableCell>
+                              <TableCell className="text-white/70 text-[10px] font-mono">{formatPrice(signal.entryPrice, signal.asset)}</TableCell>
+                              <TableCell>
+                                <Badge className={`${resultBg(signal.result)} text-[10px] px-1.5 py-0 border`}>
+                                  {signal.result || signal.status}
+                                </Badge>
+                              </TableCell>
+                              <TableCell><PatternBadge pattern={signal.patternType} /></TableCell>
+                              <TableCell><SessionBadge session={signal.sessionType} /></TableCell>
+                              <TableCell><SetupScoreBar score={signal.setupScore} /></TableCell>
+                              <TableCell><SourceBadge source={signal.source} /></TableCell>
+                              <TableCell><AnalysisModeBadge mode={signal.analysisMode} /></TableCell>
+                              <TableCell>
+                                {signal.status === "PENDING" && (
+                                  <Button variant="ghost" size="sm" onClick={() => handleCancelSignal(signal.id)} className="text-[#ff3366]/70 hover:text-[#ff3366] hover:bg-[#ff3366]/10 h-6 text-[10px]">
+                                    Cancelar
+                                  </Button>
+                                )}
                               </TableCell>
                             </TableRow>
-                          ) : (
-                            signals.map((signal) => (
-                              <TableRow key={signal.id} className="border-white/5 hover:bg-white/5">
-                                <TableCell className="text-white/70 text-xs whitespace-nowrap">
-                                  {formatTime(signal.entryTime)}
-                                </TableCell>
-                                <TableCell className="text-white text-xs font-medium">
-                                  {signal.asset}
-                                </TableCell>
-                                <TableCell className="text-white/70 text-xs">
-                                  {signal.timeframe}
-                                </TableCell>
-                                <TableCell>
-                                  <div className="flex items-center gap-1">
-                                    {directionIcon(signal.direction)}
-                                    <span className={`text-xs ${signal.direction === "HIGHER" ? "text-[#00ff88]" : signal.direction === "LOWER" ? "text-[#ff3366]" : "text-[#00aaff]"}`}>
-                                      {signal.direction}
-                                    </span>
-                                  </div>
-                                </TableCell>
-                                <TableCell className="text-white/70 text-xs font-mono">
-                                  {formatPrice(signal.entryPrice, signal.asset)}
-                                </TableCell>
-                                <TableCell className="text-white/70 text-xs font-mono">
-                                  {signal.exitPrice ? formatPrice(signal.exitPrice, signal.asset) : "—"}
-                                </TableCell>
-                                <TableCell>
-                                  <div className="flex items-center gap-1">
-                                    <Progress
-                                      value={signal.confidence}
-                                      className="h-1.5 w-12 bg-white/10"
-                                      style={{ "--progress-color": signal.confidence >= 70 ? NEON_GREEN : signal.confidence >= 55 ? NEON_YELLOW : NEON_RED } as React.CSSProperties}
-                                    />
-                                    <span className="text-xs text-white/60">{signal.confidence}%</span>
-                                  </div>
-                                </TableCell>
-                                <TableCell>
-                                  {signal.status === "PENDING" ? (
-                                    <Badge className={`text-[10px] ${statusBg(signal.status)}`}>
-                                      PENDIENTE
-                                    </Badge>
-                                  ) : signal.result ? (
-                                    <Badge className={`text-[10px] ${resultBg(signal.result)}`}>
-                                      {signal.result}
-                                    </Badge>
-                                  ) : (
-                                    <Badge className={`text-[10px] ${statusBg(signal.status)}`}>
-                                      {signal.status}
-                                    </Badge>
-                                  )}
-                                </TableCell>
-                                <TableCell>
-                                  <Badge className={`text-[9px] ${analysisModeConfig(signal.analysisMode).bg}`}>
-                                    {analysisModeConfig(signal.analysisMode).label}
-                                  </Badge>
-                                </TableCell>
-                                <TableCell>
-                                  <span className="text-[10px] font-medium" style={{ color: reliabilityConfig(signal.statisticalReliability).color }}>
-                                    {reliabilityConfig(signal.statisticalReliability).label}
-                                    {signal.historicalSampleSize !== null && signal.historicalSampleSize > 0 && (
-                                      <span className="text-white/30 ml-0.5">({signal.historicalSampleSize})</span>
-                                    )}
-                                  </span>
-                                </TableCell>
-                                <TableCell className={`text-xs font-mono ${resultColor(signal.result)}`}>
-                                  {signal.priceDifference !== null ? (signal.priceDifference > 0 ? "+" : "") + signal.priceDifference.toFixed(5) : "—"}
-                                </TableCell>
-                                <TableCell className="text-white/40 text-xs max-w-[150px] truncate">
-                                  {signal.aiReason || "—"}
-                                </TableCell>
-                                <TableCell>
-                                  {signal.status === "PENDING" && (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      onClick={() => handleCancelSignal(signal.id)}
-                                      className="text-[#ff3366]/70 hover:text-[#ff3366] hover:bg-[#ff3366]/10 h-6 text-[10px]"
-                                    >
-                                      Cancelar
-                                    </Button>
-                                  )}
-                                </TableCell>
-                              </TableRow>
-                            ))
-                          )}
-                        </AnimatePresence>
+                          ))
+                        )}
                       </TableBody>
                     </Table>
                   </ScrollArea>
@@ -1002,745 +1187,843 @@ export default function TradingDashboard() {
 
               {/* Pagination */}
               <div className="flex items-center justify-between">
-                <span className="text-white/40 text-xs">
-                  Página {page} de {totalPages}
-                </span>
+                <span className="text-xs text-white/30">Página {page} de {totalPages}</span>
                 <div className="flex gap-2">
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={page <= 1}
-                    onClick={() => setPage((p) => Math.max(1, p - 1))}
-                    className="bg-[#111827] border-white/10 text-white/60 hover:text-white hover:bg-white/10"
-                  >
-                    <ChevronLeft className="size-4" />
+                  <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)} className="border-white/10 text-white/50 hover:text-white">
+                    <ChevronLeft className="size-3" />
                   </Button>
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    disabled={page >= totalPages}
-                    onClick={() => setPage((p) => p + 1)}
-                    className="bg-[#111827] border-white/10 text-white/60 hover:text-white hover:bg-white/10"
-                  >
-                    <ChevronRight className="size-4" />
+                  <Button variant="outline" size="sm" disabled={page >= totalPages} onClick={() => setPage(page + 1)} className="border-white/10 text-white/50 hover:text-white">
+                    <ChevronRight className="size-3" />
                   </Button>
                 </div>
               </div>
             </motion.div>
           </TabsContent>
 
-          {/* ─── GENERAR TAB ────────────────────────────────────────────────── */}
-          <TabsContent value="generar">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 mt-4"
-            >
-              {/* Mode Toggle */}
-              <div className="flex gap-2">
-                <Button
-                  variant={!manualMode ? "default" : "outline"}
-                  onClick={() => setManualMode(false)}
-                  className={!manualMode ? "bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/30 hover:bg-[#00ff88]/30" : "bg-[#111827] border-white/10 text-white/60 hover:text-white hover:bg-white/10"}
-                >
-                  <Bot className="size-4 mr-2" />
-                  Generar con IA
-                </Button>
-                <Button
-                  variant={manualMode ? "default" : "outline"}
-                  onClick={() => setManualMode(true)}
-                  className={manualMode ? "bg-[#00aaff]/20 text-[#00aaff] border border-[#00aaff]/30 hover:bg-[#00aaff]/30" : "bg-[#111827] border-white/10 text-white/60 hover:text-white hover:bg-white/10"}
-                >
-                  <Eye className="size-4 mr-2" />
-                  Manual
-                </Button>
-              </div>
+          {/* ─── TAB 3: SETUP SCORES ───────────────────────────────────────── */}
+          <TabsContent value="setup-scores">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {/* Form */}
-                <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm">
-                      {manualMode ? "Crear Señal Manual" : "Configurar Señal IA"}
-                    </CardTitle>
-                    <CardDescription className="text-white/40">
-                      {manualMode
-                        ? "Complete los campos para crear una señal manualmente"
-                        : "Seleccione el activo y temporalidad, la IA generará el análisis"}
-                    </CardDescription>
-                  </CardHeader>
-                  <CardContent className="space-y-4">
-                    <div className="grid grid-cols-2 gap-3">
-                      <div className="space-y-2">
-                        <Label className="text-white/60 text-xs">Activo</Label>
-                        <Select value={genAsset} onValueChange={setGenAsset}>
-                          <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent className="bg-[#111827] border-white/10">
-                            {ASSETS.map((a) => (
-                              <SelectItem key={a} value={a}>{a}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                      </div>
-                      <div className="space-y-2">
-                        <Label className="text-white/60 text-xs">Temporalidad</Label>
-                        <Select value={genTimeframe} onValueChange={(v) => { setGenTimeframe(v); if (!manualMode) setGenEntryPrice(""); }}>
-                          <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent className="bg-[#111827] border-white/10">
-                            {TIMEFRAMES.map((t) => (
-                              <SelectItem key={t} value={t}>{t}</SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
+              {/* No Edge Warning */}
+              {setupScores && Object.values(setupScores.summary.byPattern).every(p => p.edge !== "POSITIVE") && (
+                <Card className="bg-[#ff3366]/5 border-[#ff3366]/30">
+                  <CardContent className="p-4">
+                    <div className="flex items-center gap-3">
+                      <AlertOctagon className="size-6 text-[#ff3366]" />
+                      <div>
+                        <div className="text-sm font-bold text-[#ff3366]">NO HAY EDGE DETECTADO</div>
+                        <div className="text-xs text-white/50">Ningún patrón muestra un edge positivo estadísticamente significativo. Sigue recolectando datos antes de operar con confianza.</div>
                       </div>
                     </div>
+                  </CardContent>
+                </Card>
+              )}
 
-                    {manualMode && (
-                      <>
-                        <div className="grid grid-cols-2 gap-3">
-                          <div className="space-y-2">
-                            <Label className="text-white/60 text-xs">Dirección</Label>
-                            <Select value={genDirection} onValueChange={setGenDirection}>
-                              <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white">
-                                <SelectValue />
-                              </SelectTrigger>
-                              <SelectContent className="bg-[#111827] border-white/10">
-                                {DIRECTIONS.map((d) => (
-                                  <SelectItem key={d} value={d}>{d}</SelectItem>
-                                ))}
-                              </SelectContent>
-                            </Select>
+              {/* Pattern Performance Table */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Flame className="size-4 text-[#aa66ff]" /> Rendimiento por Patrón</CardTitle></CardHeader>
+                <CardContent>
+                  <ScrollArea className="w-full">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-white/10 hover:bg-transparent">
+                          <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Wins</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Losses</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Win Rate</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Muestra</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {setupScores ? Object.entries(setupScores.summary.byPattern).map(([pattern, data]) => (
+                          <TableRow key={pattern} className="border-white/5 hover:bg-white/5">
+                            <TableCell><PatternBadge pattern={pattern} /></TableCell>
+                            <TableCell className="text-white text-[10px]">{data.totalSignals}</TableCell>
+                            <TableCell className="text-[#00ff88] text-[10px]">{data.wins}</TableCell>
+                            <TableCell className="text-[#ff3366] text-[10px]">{data.losses}</TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: data.winRate >= 60 ? NEON_GREEN : data.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>
+                              {data.winRate.toFixed(1)}%
+                            </TableCell>
+                            <TableCell>
+                              <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${edgeColor(data.edge)}15`, color: edgeColor(data.edge), borderColor: `${edgeColor(data.edge)}30` }}>
+                                {edgeLabel(data.edge)}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-white/40 text-[10px]">{data.totalSignals < 30 ? "INSUFICIENTE" : data.totalSignals < 100 ? "BAJA" : data.totalSignals < 500 ? "MEDIA" : "ALTA"}</TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow><TableCell colSpan={7} className="text-center text-white/30 py-8 text-xs">Cargando datos...</TableCell></TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+
+              {/* Session Performance Table */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Globe className="size-4 text-[#00aaff]" /> Rendimiento por Sesión</CardTitle></CardHeader>
+                <CardContent>
+                  <ScrollArea className="w-full">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-white/10 hover:bg-transparent">
+                          <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Wins</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Losses</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Win Rate</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {setupScores ? Object.entries(setupScores.summary.bySession).map(([session, data]) => (
+                          <TableRow key={session} className="border-white/5 hover:bg-white/5">
+                            <TableCell><SessionBadge session={session} /></TableCell>
+                            <TableCell className="text-white text-[10px]">{data.totalSignals}</TableCell>
+                            <TableCell className="text-[#00ff88] text-[10px]">{data.wins}</TableCell>
+                            <TableCell className="text-[#ff3366] text-[10px]">{data.losses}</TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: data.winRate >= 60 ? NEON_GREEN : data.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>
+                              {data.winRate.toFixed(1)}%
+                            </TableCell>
+                            <TableCell>
+                              <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${edgeColor(data.edge)}15`, color: edgeColor(data.edge), borderColor: `${edgeColor(data.edge)}30` }}>
+                                {edgeLabel(data.edge)}
+                              </Badge>
+                            </TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow><TableCell colSpan={6} className="text-center text-white/30 py-8 text-xs">Cargando datos...</TableCell></TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+
+              {/* Pattern × Session Matrix */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Layers className="size-4 text-[#ffaa00]" /> Matriz Patrón × Sesión</CardTitle></CardHeader>
+                <CardContent>
+                  {setupScores && setupScores.scores.length > 0 ? (
+                    <ScrollArea className="w-full">
+                      <div className="min-w-[500px]">
+                        <div className="grid grid-cols-6 gap-1 mb-1">
+                          <div className="text-[9px] text-white/30 p-1">Patrón \ Sesión</div>
+                          {SESSION_TYPES.filter(s => s !== "OffHours").map(s => (
+                            <div key={s} className="text-[9px] text-white/40 p-1 text-center" style={{ color: SESSION_COLORS[s] }}>{SESSION_NAMES[s]}</div>
+                          ))}
+                        </div>
+                        {PATTERN_TYPES.map(pattern => {
+                          const row = SESSION_TYPES.filter(s => s !== "OffHours").map(session => {
+                            const match = setupScores.scores.find(sc => sc.patternType === pattern && sc.session === session);
+                            return match ? { winRate: match.winRate, total: match.totalSignals, edge: match.edge } : null;
+                          });
+                          return (
+                            <div key={pattern} className="grid grid-cols-6 gap-1 mb-1">
+                              <div className="text-[10px] text-white/60 p-1 flex items-center gap-1">
+                                {PATTERN_ICONS[pattern]}
+                                <span>{PATTERN_NAMES[pattern]}</span>
+                              </div>
+                              {row.map((cell, i) => (
+                                <div key={i} className={`p-1.5 rounded text-center text-[10px] font-mono ${
+                                  cell ? (cell.total < 5 ? "bg-white/5" : cell.winRate >= 60 ? "bg-[#00ff88]/15 text-[#00ff88]" : cell.winRate >= 50 ? "bg-[#ffaa00]/15 text-[#ffaa00]" : "bg-[#ff3366]/15 text-[#ff3366]")
+                                  : "bg-white/5 text-white/20"
+                                }`}>
+                                  {cell ? (cell.total < 5 ? `${cell.total}` : `${cell.winRate.toFixed(0)}%`) : "—"}
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </ScrollArea>
+                  ) : (
+                    <p className="text-white/30 text-xs text-center py-8">Sin datos de setup scores. Ejecuta el Auto-Trader para generar datos.</p>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Detailed Scores */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Database className="size-4 text-[#00ffcc]" /> Detalle de Setup Scores</CardTitle></CardHeader>
+                <CardContent>
+                  <ScrollArea className="h-96">
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-white/10 hover:bg-transparent">
+                          <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Activo</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Win Rate</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Avg Setup</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Muestra</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {setupScores ? setupScores.scores.map((s, i) => (
+                          <TableRow key={i} className="border-white/5 hover:bg-white/5">
+                            <TableCell><PatternBadge pattern={s.patternType} /></TableCell>
+                            <TableCell className="text-white/70 text-[10px]">{s.asset || "Todos"}</TableCell>
+                            <TableCell><SessionBadge session={s.session} /></TableCell>
+                            <TableCell className="text-white text-[10px]">{s.totalSignals}</TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: s.winRate >= 60 ? NEON_GREEN : s.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>
+                              {s.winRate.toFixed(1)}%
+                            </TableCell>
+                            <TableCell className="text-[10px] font-mono" style={{ color: setupScoreColor(s.avgSetupScore) }}>
+                              {s.avgSetupScore.toFixed(0)}
+                            </TableCell>
+                            <TableCell>
+                              <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${edgeColor(s.edge)}15`, color: edgeColor(s.edge), borderColor: `${edgeColor(s.edge)}30` }}>
+                                {edgeLabel(s.edge)}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="text-white/40 text-[10px]">{sampleLabel(s.sampleAdequacy)}</TableCell>
+                          </TableRow>
+                        )) : (
+                          <TableRow><TableCell colSpan={8} className="text-center text-white/30 py-8 text-xs">Cargando...</TableCell></TableRow>
+                        )}
+                      </TableBody>
+                    </Table>
+                  </ScrollArea>
+                </CardContent>
+              </Card>
+            </motion.div>
+          </TabsContent>
+
+          {/* ─── TAB 4: PATRONES Y SESIONES ─────────────────────────────────── */}
+          <TabsContent value="patrones">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* Current Session Panel */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
+                <CardContent className="p-5">
+                  <div className="flex items-center gap-4 flex-wrap">
+                    <div className="w-14 h-14 rounded-xl flex items-center justify-center" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session] }}>
+                      {currentSession.icon}
+                    </div>
+                    <div className="flex-1 min-w-[200px]">
+                      <div className="text-lg font-bold" style={{ color: SESSION_COLORS[currentSession.session] }}>
+                        {currentSession.sessionEs}
+                      </div>
+                      <div className="text-xs text-white/40 mt-1">Sesión activa ahora</div>
+                      <div className="flex gap-3 mt-2">
+                        <Badge className="text-[10px]" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session], borderColor: `${SESSION_COLORS[currentSession.session]}40` }}>
+                          <Flame className="size-3 mr-1" /> Volatilidad: {currentSession.session === "Overlap" ? "1.5x" : currentSession.session === "London" ? "1.2x" : currentSession.session === "NewYork" ? "1.0x" : currentSession.session === "Asia" ? "0.5x" : "0.3x"}
+                        </Badge>
+                        <Badge className="text-[10px]" style={{ backgroundColor: `${SESSION_COLORS[currentSession.session]}20`, color: SESSION_COLORS[currentSession.session], borderColor: `${SESSION_COLORS[currentSession.session]}40` }}>
+                          Liquidez: {currentSession.session === "Overlap" || currentSession.session === "London" || currentSession.session === "NewYork" ? "ALTA" : "BAJA"}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Session Timeline */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm">Línea Temporal de Sesiones (24h UTC)</CardTitle></CardHeader>
+                <CardContent>
+                  <div className="relative">
+                    <div className="flex h-8 rounded-lg overflow-hidden">
+                      {[
+                        { name: "Asia", start: 0, end: 7, color: SESSION_COLORS.Asia },
+                        { name: "Londres", start: 7, end: 12, color: SESSION_COLORS.London },
+                        { name: "Solape", start: 12, end: 16, color: SESSION_COLORS.Overlap },
+                        { name: "NY", start: 16, end: 21, color: SESSION_COLORS.NewYork },
+                        { name: "Off", start: 21, end: 24, color: SESSION_COLORS.OffHours },
+                      ].map(s => (
+                        <div key={s.name} className="flex items-center justify-center text-[9px] font-medium" style={{ width: `${((s.end - s.start) / 24) * 100}%`, backgroundColor: `${s.color}30`, color: s.color, borderRight: "1px solid rgba(255,255,255,0.1)" }}>
+                          {s.name}
+                        </div>
+                      ))}
+                    </div>
+                    {/* Current time indicator */}
+                    <div className="absolute top-0 h-full flex items-end" style={{ left: `${((new Date().getUTCHours() * 60 + new Date().getUTCMinutes()) / 1440) * 100}%` }}>
+                      <div className="w-0.5 h-8 bg-white/80 -translate-x-1/2" />
+                      <div className="absolute -top-5 left-1/2 -translate-x-1/2 text-[8px] text-white/70 bg-white/10 px-1 rounded">
+                        {new Date().getUTCHours().toString().padStart(2, "0")}:{new Date().getUTCMinutes().toString().padStart(2, "0")} UTC
+                      </div>
+                    </div>
+                    <div className="flex justify-between mt-1">
+                      <span className="text-[8px] text-white/20">00:00</span>
+                      <span className="text-[8px] text-white/20">06:00</span>
+                      <span className="text-[8px] text-white/20">12:00</span>
+                      <span className="text-[8px] text-white/20">18:00</span>
+                      <span className="text-[8px] text-white/20">24:00</span>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Pattern Cards */}
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                {PATTERN_TYPES.map((pattern) => {
+                  const patternStats = stats?.winRateByPattern?.[pattern];
+                  const setupData = setupScores?.summary.byPattern?.[pattern];
+                  return (
+                    <motion.div key={pattern} whileHover={{ scale: 1.02 }} transition={{ duration: 0.2 }}>
+                      <Card className="bg-[#111827] border-white/10 hover:border-white/20 transition-colors">
+                        <CardContent className="p-4">
+                          <div className="flex items-center gap-2 mb-3">
+                            <div className="w-8 h-8 rounded-lg bg-[#aa66ff]/15 flex items-center justify-center text-[#aa66ff]">
+                              {PATTERN_ICONS[pattern]}
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold text-white">{PATTERN_NAMES[pattern]}</div>
+                              <div className="text-[9px] text-white/30">{pattern}</div>
+                            </div>
                           </div>
                           <div className="space-y-2">
-                            <Label className="text-white/60 text-xs">Precio Entrada</Label>
-                            <Input
-                              value={genEntryPrice}
-                              onChange={(e) => setGenEntryPrice(e.target.value)}
-                              className="bg-[#0a0e17] border-white/10 text-white font-mono"
-                              placeholder="1.08500"
-                            />
+                            <div className="flex justify-between text-[10px]">
+                              <span className="text-white/40">Win Rate</span>
+                              <span className="font-mono" style={{ color: patternStats ? (patternStats.rate >= 60 ? NEON_GREEN : patternStats.rate >= 50 ? NEON_YELLOW : NEON_RED) : "#666" }}>
+                                {patternStats ? `${patternStats.rate.toFixed(1)}%` : "Sin datos"}
+                              </span>
+                            </div>
+                            <div className="flex justify-between text-[10px]">
+                              <span className="text-white/40">Total Señales</span>
+                              <span className="text-white font-mono">{patternStats?.total || 0}</span>
+                            </div>
+                            <div className="flex justify-between text-[10px]">
+                              <span className="text-white/40">Edge</span>
+                              <span style={{ color: edgeColor(setupData?.edge || "UNKNOWN") }}>
+                                {edgeLabel(setupData?.edge || "UNKNOWN")}
+                              </span>
+                            </div>
                           </div>
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-white/60 text-xs">Confianza: {genConfidence}%</Label>
-                          <input
-                            type="range"
-                            min={0}
-                            max={100}
-                            value={genConfidence}
-                            onChange={(e) => setGenConfidence(parseInt(e.target.value))}
-                            className="w-full accent-[#00ff88]"
-                          />
-                          <div className="flex justify-between text-[10px] text-white/30">
-                            <span>0%</span>
-                            <span>50%</span>
-                            <span>100%</span>
-                          </div>
-                        </div>
-                        <div className="space-y-2">
-                          <Label className="text-white/60 text-xs">Razón / Notas</Label>
-                          <Textarea
-                            value={genAiReason}
-                            onChange={(e) => setGenAiReason(e.target.value)}
-                            className="bg-[#0a0e17] border-white/10 text-white min-h-[80px]"
-                            placeholder="Razón de la señal..."
-                          />
-                        </div>
-                      </>
-                    )}
+                        </CardContent>
+                      </Card>
+                    </motion.div>
+                  );
+                })}
+              </div>
 
-                    <Separator className="bg-white/10" />
+              {/* Session Win Rate Chart */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <Card className="bg-[#111827] border-white/10">
+                  <CardHeader><CardTitle className="text-white text-sm">Win Rate por Patrón</CardTitle></CardHeader>
+                  <CardContent>
+                    {patternChartData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={patternChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="name" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} />
+                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} domain={[0, 100]} />
+                          <RechartsTooltip {...ChartTooltip()} />
+                          <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                            {patternChartData.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">Sin datos suficientes</div>}
+                  </CardContent>
+                </Card>
 
-                    <Button
-                      className="w-full"
-                      onClick={manualMode ? handleCreateManual : handleGenerateAI}
-                      disabled={loading.generate || loading.manual}
-                      style={{
-                        background: manualMode
-                          ? "linear-gradient(135deg, #00aaff, #0066cc)"
-                          : "linear-gradient(135deg, #00ff88, #00cc66)",
-                        color: "#0a0e17",
-                      }}
-                    >
-                      {loading.generate || loading.manual ? (
-                        <Loader2 className="size-4 mr-2 animate-spin" />
-                      ) : manualMode ? (
-                        <Eye className="size-4 mr-2" />
+                <Card className="bg-[#111827] border-white/10">
+                  <CardHeader><CardTitle className="text-white text-sm">Win Rate por Sesión</CardTitle></CardHeader>
+                  <CardContent>
+                    {sessionChartData.length > 0 ? (
+                      <ResponsiveContainer width="100%" height={220}>
+                        <BarChart data={sessionChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+                          <XAxis dataKey="name" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} />
+                          <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 9 }} domain={[0, 100]} />
+                          <RechartsTooltip {...ChartTooltip()} />
+                          <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
+                            {sessionChartData.map((entry, index) => (
+                              <Cell key={`cell-${index}`} fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED} />
+                            ))}
+                          </Bar>
+                        </BarChart>
+                      </ResponsiveContainer>
+                    ) : <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">Sin datos suficientes</div>}
+                  </CardContent>
+                </Card>
+              </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* ─── TAB 5: AUTO-TRADER ────────────────────────────────────────── */}
+          <TabsContent value="auto-trader">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* EL DATASET ES EL ACTIVO banner */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-[#00ff88]/20">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                      <Database className="size-8 text-[#00ff88]" />
+                      <div>
+                        <div className="text-sm font-bold text-[#00ff88]">EL DATASET ES EL ACTIVO MÁS VALIOSO</div>
+                        <div className="text-xs text-white/40">{totalDecisive} señales decisivas recolectadas de {datasetGoal} objetivo</div>
+                      </div>
+                    </div>
+                    <div className="w-32">
+                      <Progress value={datasetProgress} className="h-2" />
+                      <div className="text-[10px] text-[#00ff88] mt-1 text-right font-mono">{datasetProgress.toFixed(0)}%</div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Big ON/OFF Switch */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardContent className="p-6">
+                  <div className="flex items-center justify-center gap-6 flex-wrap">
+                    <div className="text-center">
+                      <motion.div whileTap={{ scale: 0.9 }}>
+                        <Button
+                          onClick={() => handleToggleAutoTrader(!autoTraderState?.isRunning)}
+                          disabled={loading.autoTrader}
+                          className={`w-32 h-32 rounded-full text-lg font-bold border-4 transition-all ${
+                            autoTraderState?.isRunning
+                              ? "bg-[#00ff88]/10 border-[#00ff88] text-[#00ff88] hover:bg-[#00ff88]/20"
+                              : "bg-[#ff3366]/5 border-[#ff3366]/40 text-[#ff3366] hover:bg-[#ff3366]/10"
+                          }`}
+                        >
+                          {loading.autoTrader ? <Loader2 className="size-8 animate-spin" /> :
+                            autoTraderState?.isRunning ? <><Square className="size-8 mb-1" /><span className="block text-xs">STOP</span></> : <><Play className="size-8 mb-1" /><span className="block text-xs">START</span></>
+                          }
+                        </Button>
+                      </motion.div>
+                      <div className="mt-2 text-xs text-white/40">
+                        {autoTraderState?.isRunning ? "Auto-Trader Activo" : "Auto-Trader Inactivo"}
+                      </div>
+                    </div>
+                    <div className="flex flex-col gap-2 text-sm">
+                      <div className="flex items-center gap-2">
+                        {autoTraderState?.isRunning ? <Wifi className="size-4 text-[#00ff88]" /> : <WifiOff className="size-4 text-white/30" />}
+                        <span className={autoTraderState?.isRunning ? "text-[#00ff88]" : "text-white/30"}>
+                          {autoTraderState?.isRunning ? "Conectado y ejecutando" : "Desconectado"}
+                        </span>
+                      </div>
+                      <div className="text-xs text-white/40">
+                        Último check: {autoTraderState?.lastCheck ? formatTime(autoTraderState.lastCheck) : "Nunca"}
+                      </div>
+                      <div className="text-xs text-white/40">
+                        Ciclos completados: {autoTraderState?.cyclesCompleted || 0}
+                      </div>
+                    </div>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Configuration Form */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Settings className="size-4" /> Configuración</CardTitle></CardHeader>
+                <CardContent className="space-y-4">
+                  {/* Assets */}
+                  <div>
+                    <Label className="text-white/60 text-xs mb-2 block">Activos</Label>
+                    <div className="flex flex-wrap gap-2">
+                      {ASSETS.map(asset => (
+                        <label key={asset} className="flex items-center gap-1.5 text-xs cursor-pointer">
+                          <Checkbox
+                            checked={selectedAssets.includes(asset)}
+                            onCheckedChange={(checked) => {
+                              setSelectedAssets(prev =>
+                                checked ? [...prev, asset] : prev.filter(a => a !== asset)
+                              );
+                            }}
+                          />
+                          <span className="text-white/70">{asset}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+                    {/* Timeframe */}
+                    <div>
+                      <Label className="text-white/60 text-xs mb-1 block">Temporalidad</Label>
+                      <Select value={autoTraderConfig.timeframe} onValueChange={(v) => setAutoTraderConfig(p => ({ ...p, timeframe: v }))}>
+                        <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-[#111827] border-white/10">
+                          {TIMEFRAMES.map(t => <SelectItem key={t} value={t}>{t}</SelectItem>)}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Interval */}
+                    <div>
+                      <Label className="text-white/60 text-xs mb-1 block">Intervalo (min)</Label>
+                      <Select value={autoTraderConfig.intervalMinutes.toString()} onValueChange={(v) => setAutoTraderConfig(p => ({ ...p, intervalMinutes: parseInt(v) }))}>
+                        <SelectTrigger className="bg-[#0a0e17] border-white/10 text-white text-xs">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent className="bg-[#111827] border-white/10">
+                          <SelectItem value="1">1 min</SelectItem>
+                          <SelectItem value="5">5 min</SelectItem>
+                          <SelectItem value="15">15 min</SelectItem>
+                          <SelectItem value="30">30 min</SelectItem>
+                          <SelectItem value="60">1 hora</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    {/* Max Concurrent */}
+                    <div>
+                      <Label className="text-white/60 text-xs mb-1 block">Máx. Señales Concurrentes</Label>
+                      <Input
+                        type="number"
+                        value={autoTraderConfig.maxConcurrentSignals}
+                        onChange={(e) => setAutoTraderConfig(p => ({ ...p, maxConcurrentSignals: parseInt(e.target.value) || 5 }))}
+                        className="bg-[#0a0e17] border-white/10 text-white text-xs"
+                      />
+                    </div>
+
+                    {/* Min Setup Score */}
+                    <div>
+                      <Label className="text-white/60 text-xs mb-1 block">Setup Score Mínimo: {autoTraderConfig.minSetupScore}</Label>
+                      <Slider
+                        value={[autoTraderConfig.minSetupScore]}
+                        onValueChange={([v]) => setAutoTraderConfig(p => ({ ...p, minSetupScore: v }))}
+                        min={0} max={100} step={5}
+                        className="mt-2"
+                      />
+                    </div>
+                  </div>
+
+                  <Button onClick={handleUpdateConfig} variant="outline" className="border-white/20 text-white/70 hover:text-white hover:bg-white/10 text-xs">
+                    Guardar Configuración
+                  </Button>
+                </CardContent>
+              </Card>
+
+              {/* Run History / Live Feed */}
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                {/* Live Feed */}
+                <Card className="bg-[#111827] border-white/10">
+                  <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Activity className="size-4 text-[#00ff88]" /> Feed en Vivo</CardTitle></CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-64">
+                      {liveFeed.length > 0 ? (
+                        <div className="space-y-1">
+                          {liveFeed.map((entry, i) => (
+                            <div key={i} className="flex items-start gap-2 p-1.5 rounded bg-white/5">
+                              <span className="text-[9px] text-white/30 font-mono whitespace-nowrap">{entry.time}</span>
+                              <span className={`text-[10px] ${entry.type === "success" ? "text-[#00ff88]" : entry.type === "error" ? "text-[#ff3366]" : "text-[#ffaa00]"}`}>
+                                {entry.message}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
                       ) : (
-                        <Bot className="size-4 mr-2" />
+                        <p className="text-white/30 text-xs text-center py-8">Sin actividad. Inicia el Auto-Trader o ejecuta un ciclo.</p>
                       )}
-                      {manualMode ? "Crear Señal Manual" : "Generar con IA"}
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+
+                {/* Recent Auto Signals */}
+                <Card className="bg-[#111827] border-white/10">
+                  <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Bot className="size-4 text-[#aa66ff]" /> Señales Recientes Auto</CardTitle></CardHeader>
+                  <CardContent>
+                    <ScrollArea className="h-64">
+                      {autoTraderState?.recentSignals && autoTraderState.recentSignals.length > 0 ? (
+                        <div className="space-y-1.5">
+                          {autoTraderState.recentSignals.slice(0, 10).map((s) => (
+                            <div key={s.id} className="flex items-center justify-between p-2 rounded-lg bg-white/5 hover:bg-white/10 transition-colors">
+                              <div className="flex items-center gap-2">
+                                {directionIcon(s.direction)}
+                                <span className="text-[10px] font-medium text-white">{s.asset}</span>
+                                <PatternBadge pattern={s.pattern} />
+                              </div>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[9px] text-white/40">Conf: {s.confidence.toFixed(0)}%</span>
+                                <SetupScoreBar score={s.setupScore} />
+                                <Badge className={`${s.direction === "NO_OPERAR" ? "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30" : s.status === "PENDING" ? "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30" : "bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30"} text-[9px] px-1 py-0`}>
+                                  {s.direction === "NO_OPERAR" ? "SKIP" : s.status}
+                                </Badge>
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        <p className="text-white/30 text-xs text-center py-8">No hay señales auto generadas aún.</p>
+                      )}
+                    </ScrollArea>
+                  </CardContent>
+                </Card>
+              </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* ─── TAB 6: BACKTESTING ────────────────────────────────────────── */}
+          <TabsContent value="backtesting">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {!insights && !loading.backtesting && (
+                <Card className="bg-[#111827] border-white/10">
+                  <CardContent className="p-6 text-center">
+                    <Brain className="size-12 text-white/20 mx-auto mb-3" />
+                    <p className="text-white/40 text-sm mb-3">Carga los datos de backtesting para ver insights</p>
+                    <Button onClick={fetchInsights} variant="outline" className="border-white/20 text-white/70 hover:text-white hover:bg-white/10">
+                      <Brain className="size-4 mr-2" /> Cargar Backtesting
                     </Button>
                   </CardContent>
                 </Card>
-
-                {/* AI Analysis Preview */}
-                <Card className="bg-[#111827] border-white/10">
-                  <CardHeader>
-                    <CardTitle className="text-white text-sm flex items-center gap-2">
-                      <Brain className="size-4 text-[#aa66ff]" />
-                      Vista Previa del Análisis
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    {/* Analysis Mode Warning Banner */}
-                    {!manualMode && stats && stats.totalSignals < 30 && (
-                      <div className="bg-[#ff3366]/10 border border-[#ff3366]/30 rounded-lg p-3">
-                        <div className="flex items-start gap-2">
-                          <AlertTriangle className="size-4 text-[#ff3366] mt-0.5 shrink-0" />
-                          <div>
-                            <p className="text-[#ff3366] text-xs font-medium">DATOS INSUFICIENTES PARA ANÁLISIS COMPLETO</p>
-                            <p className="text-white/50 text-[10px] mt-1">
-                              Se requieren mínimo 30 señales cerradas para análisis confiable.
-                              Actualmente: {stats.totalSignals} señales.
-                              La IA generará NO_OPERAR hasta tener suficiente historial.
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
-
-                    {genAiReason ? (
-                      <div className="bg-[#0a0e17] rounded-lg p-4 border border-white/5">
-                        <p className="text-white/80 text-sm whitespace-pre-wrap">{genAiReason}</p>
-                      </div>
-                    ) : (
-                      <div className="bg-[#0a0e17] rounded-lg p-4 border border-white/5 text-center">
-                        <Bot className="size-8 text-white/20 mx-auto mb-2" />
-                        <p className="text-white/30 text-sm">
-                          {manualMode
-                            ? "Escriba una razón para la señal"
-                            : "Haga clic en 'Generar con IA' para obtener un análisis"}
-                        </p>
-                      </div>
-                    )}
-
-                    {/* Quick Stats Context */}
-                    {stats && (
-                      <div className="grid grid-cols-2 gap-2">
-                        <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Win Rate General</p>
-                          <p className={`text-lg font-bold ${stats.winRate >= 60 ? "text-[#00ff88]" : stats.winRate >= 50 ? "text-[#ffcc00]" : "text-[#ff3366]"}`}>
-                            {stats.winRate.toFixed(1)}%
-                          </p>
-                        </div>
-                        <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Confianza Recomendada</p>
-                          <p className="text-lg font-bold text-[#00aaff]">
-                            {stats.recommendedConfidenceThreshold}%
-                          </p>
-                        </div>
-                        <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Señales Cerradas</p>
-                          <p className={`text-lg font-bold ${stats.totalSignals >= 30 ? "text-[#00ff88]" : stats.totalSignals >= 10 ? "text-[#ffcc00]" : "text-[#ff3366]"}`}>
-                            {stats.totalSignals}
-                          </p>
-                          <p className="text-white/30 text-[9px]">mín. 30 para ALTA</p>
-                        </div>
-                        <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase">Confiabilidad Estadística</p>
-                          <p className={`text-lg font-bold ${stats.totalSignals >= 500 ? "text-[#00ff88]" : stats.totalSignals >= 100 ? "text-[#ffcc00]" : "text-[#ff3366]"}`}>
-                            {stats.totalSignals >= 500 ? "ALTA" : stats.totalSignals >= 100 ? "MEDIA" : stats.totalSignals >= 30 ? "BAJA" : "INSUFICIENTE"}
-                          </p>
-                        </div>
-                      </div>
-                    )}
-
-                    {/* Data Sources Available Indicator */}
-                    <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                      <p className="text-white/40 text-[10px] uppercase mb-2">Fuentes de Datos Disponibles</p>
-                      <DataAvailabilityBadges dataAvail={{
-                        technical: false,
-                        volume: false,
-                        patterns: false,
-                        sentiment: false,
-                        news: false,
-                        macro: false,
-                      }} />
-                      <p className="text-white/30 text-[9px] mt-2">
-                        Las fuentes se activarán según disponibilidad del análisis IA
-                      </p>
-                    </div>
-
-                    {/* Asset-specific context */}
-                    {stats && genAsset && stats.winRateByAsset[genAsset] && (
-                      <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5">
-                        <p className="text-white/40 text-[10px] uppercase mb-1">Rendimiento {genAsset}</p>
-                        <div className="flex items-center justify-between">
-                          <span className={`text-sm font-bold ${stats.winRateByAsset[genAsset].rate >= 60 ? "text-[#00ff88]" : "text-[#ff3366]"}`}>
-                            {stats.winRateByAsset[genAsset].rate.toFixed(1)}%
-                          </span>
-                          <span className="text-white/30 text-xs">
-                            {stats.winRateByAsset[genAsset].wins}W / {stats.winRateByAsset[genAsset].total - stats.winRateByAsset[genAsset].wins}L
-                          </span>
-                        </div>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </div>
-            </motion.div>
-          </TabsContent>
-
-          {/* ─── BACKTESTING TAB ────────────────────────────────────────────── */}
-          <TabsContent value="backtesting">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 mt-4"
-            >
-              {loading.backtesting && (
-                <div className="flex items-center justify-center py-20">
-                  <Loader2 className="size-8 text-[#00ff88] animate-spin mr-3" />
-                  <span className="text-white/50">Analizando datos históricos...</span>
-                </div>
               )}
 
-              {!loading.backtesting && insights && (
+              {loading.backtesting && (
+                <Card className="bg-[#111827] border-white/10">
+                  <CardContent className="p-6 text-center">
+                    <Loader2 className="size-8 text-[#00aaff] mx-auto animate-spin" />
+                    <p className="text-white/40 text-sm mt-3">Analizando señales...</p>
+                  </CardContent>
+                </Card>
+              )}
+
+              {insights && (
                 <>
                   {/* Summary */}
                   <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                    <StatCard
-                      title="Total Analizadas"
-                      value={insights.summary.totalSignals}
-                      icon={<Activity className="size-5" />}
-                      color="#00aaff"
-                    />
-                    <StatCard
-                      title="Win Rate Global"
-                      value={`${insights.summary.overallWinRate.toFixed(1)}%`}
-                      icon={<Target className="size-5" />}
-                      color={insights.summary.overallWinRate >= 60 ? "#00ff88" : "#ff3366"}
-                    />
-                    <StatCard
-                      title="Profit Factor"
-                      value={insights.summary.profitFactor.toString()}
-                      icon={<TrendingUp className="size-5" />}
-                      color={insights.summary.profitFactor >= 1.5 ? "#00ff88" : "#ffcc00"}
-                    />
-                    <StatCard
-                      title="Confianza Min. Rec."
-                      value={`${insights.summary.recommendedConfidenceThreshold}%`}
-                      icon={<Shield className="size-5" />}
-                      color="#aa66ff"
-                    />
-                    <StatCard
-                      title="WR con Filtro"
-                      value={`${insights.summary.bestThresholdWinRate}%`}
-                      icon={<CheckCircle className="size-5" />}
-                      color="#00ffcc"
-                    />
+                    <StatCard title="Total Analizadas" value={insights.summary.totalSignals} icon={<Activity className="size-4" />} color={NEON_BLUE} />
+                    <StatCard title="Win Rate Global" value={`${insights.summary.overallWinRate.toFixed(1)}%`} icon={<Target className="size-4" />} color={insights.summary.overallWinRate >= 60 ? NEON_GREEN : NEON_RED} />
+                    <StatCard title="Profit Factor" value={insights.summary.profitFactor === -1 ? "∞" : insights.summary.profitFactor.toFixed(2)} icon={<TrendingUp className="size-4" />} color={insights.summary.profitFactor >= 1.5 ? NEON_GREEN : NEON_YELLOW} />
+                    <StatCard title="Conf. Recomendada" value={`≥${insights.summary.recommendedConfidenceThreshold}%`} icon={<Gauge className="size-4" />} color={NEON_CYAN} />
+                    <StatCard title="Mejor WR Filtrado" value={`${insights.summary.bestThresholdWinRate.toFixed(1)}%`} icon={<CheckCircle className="size-4" />} color={NEON_GREEN} />
                   </div>
 
-                  {/* Warnings */}
-                  {insights.warnings.length > 0 && (
-                    <Card className="bg-[#111827] border-[#ff3366]/30">
-                      <CardHeader>
-                        <CardTitle className="text-[#ff3366] text-sm flex items-center gap-2">
-                          <AlertTriangle className="size-4" />
-                          Advertencias del Backtesting
-                        </CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <ul className="space-y-1">
-                          {insights.warnings.map((w, i) => (
-                            <li key={i} className="text-white/70 text-sm flex items-start gap-2">
-                              <span className="text-[#ff3366] mt-1">•</span>
-                              {w}
-                            </li>
-                          ))}
-                        </ul>
+                  {/* Statistical significance warning */}
+                  {totalDecisive < 100 && (
+                    <Card className="bg-[#ffaa00]/5 border-[#ffaa00]/20">
+                      <CardContent className="p-3">
+                        <div className="flex items-center gap-2">
+                          <AlertTriangle className="size-4 text-[#ffaa00]" />
+                          <span className="text-xs text-[#ffaa00]">Significancia estadística baja ({totalDecisive} señales). Necesitas mínimo 100 para conclusiones confiables. Los resultados pueden ser ruido.</span>
+                        </div>
                       </CardContent>
                     </Card>
                   )}
 
-                  {/* Asset & Timeframe Performance */}
-                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                    <Card className="bg-[#111827] border-white/10">
-                      <CardHeader>
-                        <CardTitle className="text-white text-sm">Rendimiento por Activo</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        {insights.assetPerformance.length > 0 ? (
-                          <ResponsiveContainer width="100%" height={250}>
-                            <BarChart data={insights.assetPerformance}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                              <XAxis dataKey="asset" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                              <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} domain={[0, 100]} />
-                              <RechartsTooltip
-                                contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                                labelStyle={{ color: "#fff" }}
-                              />
-                              <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                                {insights.assetPerformance.map((entry, index) => (
-                                  <Cell
-                                    key={`cell-${index}`}
-                                    fill={entry.recommendation === "OPERAR" ? NEON_GREEN : entry.recommendation === "EVITAR" ? NEON_RED : NEON_YELLOW}
-                                  />
-                                ))}
-                              </Bar>
-                            </BarChart>
-                          </ResponsiveContainer>
-                        ) : (
-                          <div className="h-[250px] flex items-center justify-center text-white/30 text-sm">
-                            Sin datos suficientes
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-
-                    <Card className="bg-[#111827] border-white/10">
-                      <CardHeader>
-                        <CardTitle className="text-white text-sm">Rendimiento por Temporalidad</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        {insights.timeframePerformance.length > 0 ? (
-                          <ResponsiveContainer width="100%" height={250}>
-                            <BarChart data={insights.timeframePerformance}>
-                              <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
-                              <XAxis dataKey="timeframe" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
-                              <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} domain={[0, 100]} />
-                              <RechartsTooltip
-                                contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                                labelStyle={{ color: "#fff" }}
-                              />
-                              <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
-                                {insights.timeframePerformance.map((entry, index) => (
-                                  <Cell
-                                    key={`cell-${index}`}
-                                    fill={entry.recommendation === "OPERAR" ? NEON_GREEN : entry.recommendation === "EVITAR" ? NEON_RED : NEON_YELLOW}
-                                  />
-                                ))}
-                              </Bar>
-                            </BarChart>
-                          </ResponsiveContainer>
-                        ) : (
-                          <div className="h-[250px] flex items-center justify-center text-white/30 text-sm">
-                            Sin datos suficientes
-                          </div>
-                        )}
-                      </CardContent>
-                    </Card>
-                  </div>
-
                   {/* Confidence Analysis */}
                   <Card className="bg-[#111827] border-white/10">
-                    <CardHeader>
-                      <CardTitle className="text-white text-sm">Análisis por Nivel de Confianza</CardTitle>
-                    </CardHeader>
+                    <CardHeader><CardTitle className="text-white text-sm">Análisis por Nivel de Confianza</CardTitle></CardHeader>
                     <CardContent>
                       {confidenceChartData.length > 0 ? (
-                        <ResponsiveContainer width="100%" height={250}>
+                        <ResponsiveContainer width="100%" height={220}>
                           <BarChart data={confidenceChartData}>
                             <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
                             <XAxis dataKey="range" tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} />
                             <YAxis tick={{ fill: "rgba(255,255,255,0.5)", fontSize: 10 }} domain={[0, 100]} />
-                            <RechartsTooltip
-                              contentStyle={{ background: "#1a1f2e", border: "1px solid rgba(255,255,255,0.1)", borderRadius: "8px" }}
-                              labelStyle={{ color: "#fff" }}
-                            />
+                            <RechartsTooltip {...ChartTooltip()} />
                             <Bar dataKey="winRate" radius={[4, 4, 0, 0]}>
                               {confidenceChartData.map((entry, index) => (
-                                <Cell
-                                  key={`cell-${index}`}
-                                  fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED}
-                                />
+                                <Cell key={`cell-${index}`} fill={entry.winRate >= 60 ? NEON_GREEN : entry.winRate >= 50 ? NEON_YELLOW : NEON_RED} />
                               ))}
                             </Bar>
                           </BarChart>
                         </ResponsiveContainer>
-                      ) : (
-                        <div className="h-[250px] flex items-center justify-center text-white/30 text-sm">
-                          Sin datos suficientes
-                        </div>
-                      )}
+                      ) : <div className="h-[220px] flex items-center justify-center text-white/30 text-sm">Sin datos</div>}
                     </CardContent>
                   </Card>
 
+                  {/* Asset & Timeframe Performance */}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                    <Card className="bg-[#111827] border-white/10">
+                      <CardHeader><CardTitle className="text-white text-sm">Rendimiento por Activo</CardTitle></CardHeader>
+                      <CardContent>
+                        <ScrollArea className="h-48">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-white/10 hover:bg-transparent">
+                                <TableHead className="text-white/50 text-[10px]">Activo</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">WR</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Recom.</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {insights.assetPerformance.map((a) => (
+                                <TableRow key={a.asset} className="border-white/5 hover:bg-white/5">
+                                  <TableCell className="text-white text-[10px] font-medium">{a.asset}</TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: a.winRate >= 60 ? NEON_GREEN : a.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>{a.winRate.toFixed(1)}%</TableCell>
+                                  <TableCell className="text-white/50 text-[10px]">{a.total}</TableCell>
+                                  <TableCell>
+                                    <Badge className={`${a.recommendation === "OPERAR" ? "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" : a.recommendation === "EVITAR" ? "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" : "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30"} text-[9px] px-1.5 py-0 border`}>
+                                      {a.recommendation}
+                                    </Badge>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>
+                      </CardContent>
+                    </Card>
+
+                    <Card className="bg-[#111827] border-white/10">
+                      <CardHeader><CardTitle className="text-white text-sm">Rendimiento por Temporalidad</CardTitle></CardHeader>
+                      <CardContent>
+                        <ScrollArea className="h-48">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-white/10 hover:bg-transparent">
+                                <TableHead className="text-white/50 text-[10px]">TF</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">WR</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Recom.</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {insights.timeframePerformance.map((t) => (
+                                <TableRow key={t.timeframe} className="border-white/5 hover:bg-white/5">
+                                  <TableCell className="text-white text-[10px] font-medium">{t.timeframe}</TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: t.winRate >= 60 ? NEON_GREEN : t.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>{t.winRate.toFixed(1)}%</TableCell>
+                                  <TableCell className="text-white/50 text-[10px]">{t.total}</TableCell>
+                                  <TableCell>
+                                    <Badge className={`${t.recommendation === "OPERAR" ? "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" : t.recommendation === "EVITAR" ? "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" : "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30"} text-[9px] px-1.5 py-0 border`}>
+                                      {t.recommendation}
+                                    </Badge>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>
+                      </CardContent>
+                    </Card>
+                  </div>
+
+                  {/* Warnings */}
+                  {insights.warnings.length > 0 && (
+                    <Card className="bg-[#111827] border-white/10">
+                      <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><AlertTriangle className="size-4 text-[#ffaa00]" /> Advertencias</CardTitle></CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {insights.warnings.map((w, i) => (
+                            <div key={i} className="flex items-start gap-2 p-2 rounded-lg bg-[#ffaa00]/5">
+                              <AlertTriangle className="size-3 text-[#ffaa00] mt-0.5 shrink-0" />
+                              <span className="text-xs text-white/60">{w}</span>
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
                   {/* Recommended Filters */}
                   <Card className="bg-[#111827] border-white/10">
-                    <CardHeader>
-                      <CardTitle className="text-white text-sm flex items-center gap-2">
-                        <Shield className="size-4 text-[#aa66ff]" />
-                        Filtros Recomendados
-                      </CardTitle>
-                    </CardHeader>
+                    <CardHeader><CardTitle className="text-white text-sm flex items-center gap-2"><Shield className="size-4 text-[#00aaff]" /> Filtros Recomendados</CardTitle></CardHeader>
                     <CardContent>
-                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        <FilterItem
-                          title="Activos Recomendados"
-                          items={insights.recommendedFilters.goodAssets}
-                          color="#00ff88"
-                          emptyText="Sin datos suficientes"
-                        />
-                        <FilterItem
-                          title="Activos a Evitar"
-                          items={insights.recommendedFilters.badAssets}
-                          color="#ff3366"
-                          emptyText="Ninguno identificado"
-                        />
-                        <FilterItem
-                          title="Temporalidades Recomendadas"
-                          items={insights.recommendedFilters.goodTimeframes}
-                          color="#00ff88"
-                          emptyText="Sin datos suficientes"
-                        />
-                        <FilterItem
-                          title="Horas Buenas"
-                          items={insights.recommendedFilters.goodHours}
-                          color="#00ff88"
-                          emptyText="Sin datos suficientes"
-                        />
-                        <FilterItem
-                          title="Horas a Evitar"
-                          items={insights.recommendedFilters.badHours}
-                          color="#ff3366"
-                          emptyText="Ninguna identificada"
-                        />
-                        <div className="bg-[#0a0e17] rounded-lg p-4 border border-white/5">
-                          <p className="text-white/40 text-[10px] uppercase mb-2">Confianza Mínima</p>
-                          <p className="text-2xl font-bold text-[#aa66ff]">
-                            {insights.recommendedFilters.minimumConfidence}%
-                          </p>
-                          {insights.recommendedFilters.avoidConsecutiveLosses && (
-                            <Badge className="mt-2 bg-[#ff3366]/15 text-[#ff3366] border border-[#ff3366]/30 text-[10px]">
-                              Evitar operar por pérdidas consecutivas
-                            </Badge>
-                          )}
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {insights.recommendedFilters.goodAssets.length > 0 && (
+                          <div className="p-3 rounded-lg bg-[#00ff88]/5 border border-[#00ff88]/10">
+                            <div className="text-[10px] text-[#00ff88] font-semibold mb-1">BUENOS ACTIVOS</div>
+                            <div className="text-xs text-white/60">{insights.recommendedFilters.goodAssets.join(", ")}</div>
+                          </div>
+                        )}
+                        {insights.recommendedFilters.badAssets.length > 0 && (
+                          <div className="p-3 rounded-lg bg-[#ff3366]/5 border border-[#ff3366]/10">
+                            <div className="text-[10px] text-[#ff3366] font-semibold mb-1">EVITAR ACTIVOS</div>
+                            <div className="text-xs text-white/60">{insights.recommendedFilters.badAssets.join(", ")}</div>
+                          </div>
+                        )}
+                        <div className="p-3 rounded-lg bg-[#00aaff]/5 border border-[#00aaff]/10">
+                          <div className="text-[10px] text-[#00aaff] font-semibold mb-1">CONFIANZA MÍNIMA</div>
+                          <div className="text-xs text-white/60">≥ {insights.recommendedFilters.minimumConfidence}%</div>
                         </div>
+                        {insights.recommendedFilters.goodHours.length > 0 && (
+                          <div className="p-3 rounded-lg bg-[#00ff88]/5 border border-[#00ff88]/10">
+                            <div className="text-[10px] text-[#00ff88] font-semibold mb-1">BUENAS HORAS</div>
+                            <div className="text-xs text-white/60">{insights.recommendedFilters.goodHours.join(", ")}</div>
+                          </div>
+                        )}
+                        {insights.recommendedFilters.badHours.length > 0 && (
+                          <div className="p-3 rounded-lg bg-[#ff3366]/5 border border-[#ff3366]/10">
+                            <div className="text-[10px] text-[#ff3366] font-semibold mb-1">MALAS HORAS</div>
+                            <div className="text-xs text-white/60">{insights.recommendedFilters.badHours.join(", ")}</div>
+                          </div>
+                        )}
+                        {insights.recommendedFilters.avoidConsecutiveLosses && (
+                          <div className="p-3 rounded-lg bg-[#ffaa00]/5 border border-[#ffaa00]/10">
+                            <div className="text-[10px] text-[#ffaa00] font-semibold mb-1">PRECAUCIÓN</div>
+                            <div className="text-xs text-white/60">Racha de pérdidas activa. Considera pausar.</div>
+                          </div>
+                        )}
                       </div>
                     </CardContent>
                   </Card>
                 </>
               )}
-
-              {!loading.backtesting && !insights && (
-                <div className="text-center py-20">
-                  <Brain className="size-12 text-white/20 mx-auto mb-4" />
-                  <p className="text-white/40 text-sm mb-4">No hay datos de backtesting disponibles</p>
-                  <Button
-                    onClick={fetchInsights}
-                    className="bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/30 hover:bg-[#00ff88]/30"
-                  >
-                    Analizar Datos
-                  </Button>
-                </div>
-              )}
             </motion.div>
           </TabsContent>
 
-          {/* ─── ALERTAS TAB ────────────────────────────────────────────────── */}
+          {/* ─── TAB 7: ALERTAS ────────────────────────────────────────────── */}
           <TabsContent value="alertas">
-            <motion.div
-              initial={{ opacity: 0, y: 20 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="space-y-4 mt-4"
-            >
-              {alerts.length === 0 ? (
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+              {alerts.length > 0 ? (
                 <Card className="bg-[#111827] border-white/10">
-                  <CardContent className="py-16 text-center">
-                    <CheckCircle className="size-12 text-[#00ff88]/30 mx-auto mb-4" />
-                    <p className="text-white/50 text-sm">No hay alertas activas</p>
-                    <p className="text-white/30 text-xs mt-1">
-                      El sistema monitorea automáticamente pérdida consecutiva, win rate bajo, y rendimiento por activo
-                    </p>
-                  </CardContent>
-                </Card>
-              ) : (
-                <div className="space-y-3">
-                  {alerts.map((alert) => (
-                    <Card key={alert.id} className="bg-[#111827] border-white/10">
-                      <CardContent className="py-4">
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="flex items-start gap-3">
-                            <div className={`mt-0.5 p-2 rounded-lg ${severityColor(alert.severity)}`}>
-                              {alert.severity === "critical" ? (
-                                <XCircle className="size-5" />
-                              ) : alert.severity === "warning" ? (
-                                <AlertTriangle className="size-5" />
-                              ) : (
-                                <Activity className="size-5" />
-                              )}
-                            </div>
+                  <CardHeader>
+                    <CardTitle className="text-white text-sm flex items-center gap-2">
+                      <AlertTriangle className="size-4 text-[#ffaa00]" /> Alertas Activas ({alerts.length})
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      {alerts.map((alert) => (
+                        <div key={alert.id} className={`flex items-center justify-between p-3 rounded-lg border ${severityColor(alert.severity)}`}>
+                          <div className="flex items-center gap-2">
+                            {alert.severity === "critical" ? <XCircle className="size-4" /> : <AlertTriangle className="size-4" />}
                             <div>
-                              <div className="flex items-center gap-2 mb-1">
-                                <Badge className={`text-[10px] ${severityColor(alert.severity)}`}>
-                                  {alert.type.replace(/_/g, " ")}
-                                </Badge>
-                                <Badge className={`text-[10px] ${severityColor(alert.severity)}`}>
-                                  {alert.severity}
-                                </Badge>
-                              </div>
-                              <p className="text-white/80 text-sm">{alert.message}</p>
-                              <p className="text-white/30 text-xs mt-1">
-                                {new Date(alert.createdAt).toLocaleString("es-ES")}
-                              </p>
+                              <span className="text-sm">{alert.message}</span>
+                              <div className="text-[9px] opacity-60 mt-0.5">{formatTime(alert.createdAt)}</div>
                             </div>
                           </div>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => handleDismissAlert(alert.id)}
-                            className="border-white/10 text-white/50 hover:text-white hover:bg-white/10 shrink-0"
-                          >
+                          <Button variant="ghost" size="sm" onClick={() => handleDismissAlert(alert.id)} className="text-white/50 hover:text-white hover:bg-white/10 h-7 text-xs">
                             Descartar
                           </Button>
                         </div>
-                      </CardContent>
-                    </Card>
-                  ))}
-                </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              ) : (
+                <Card className="bg-[#111827] border-white/10">
+                  <CardContent className="p-8 text-center">
+                    <CheckCircle className="size-12 text-[#00ff88]/30 mx-auto mb-3" />
+                    <p className="text-white/40 text-sm">No hay alertas activas</p>
+                    <p className="text-white/20 text-xs mt-1">Las alertas se generan automáticamente cuando se detectan condiciones de riesgo</p>
+                  </CardContent>
+                </Card>
               )}
-
-              {/* Alert Configuration Info */}
-              <Card className="bg-[#111827] border-white/10">
-                <CardHeader>
-                  <CardTitle className="text-white text-sm flex items-center gap-2">
-                    <Shield className="size-4 text-[#00aaff]" />
-                    Monitoreo Automático
-                  </CardTitle>
-                </CardHeader>
-                <CardContent>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <AlertConfig
-                      title="Pérdidas Consecutivas"
-                      description="Alerta cuando hay 3+ pérdidas consecutivas"
-                      icon={<TrendingDown className="size-4 text-[#ff3366]" />}
-                      active
-                    />
-                    <AlertConfig
-                      title="Win Rate Bajo"
-                      description="Alerta cuando el win rate baja del 55%"
-                      icon={<Target className="size-4 text-[#ffcc00]" />}
-                      active
-                    />
-                    <AlertConfig
-                      title="Activo con Mal Rendimiento"
-                      description="Alerta cuando un activo tiene <40% win rate en 5+ señales"
-                      icon={<BarChart3 className="size-4 text-[#ff3366]" />}
-                      active
-                    />
-                    <AlertConfig
-                      title="Señales Contradictorias"
-                      description="Alerta cuando hay HIGHER y LOWER en el mismo activo recientemente"
-                      icon={<AlertTriangle className="size-4 text-[#ffcc00]" />}
-                      active
-                    />
-                    <AlertConfig
-                      title="Alta Volatilidad"
-                      description="Alerta cuando el movimiento promedio excede 2%"
-                      icon={<Zap className="size-4 text-[#ff3366]" />}
-                      active
-                    />
-                  </div>
-                </CardContent>
-              </Card>
             </motion.div>
           </TabsContent>
+
         </Tabs>
       </main>
 
       {/* Footer */}
-      <footer className="border-t border-white/10 mt-8">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between text-white/30 text-xs">
-          <span>SignalTrader Pro v1.0</span>
-          <span>Auto-refresh: 10s</span>
+      <footer className="border-t border-white/5 mt-8">
+        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="text-[10px] text-white/20">SignalTrader Pro v2.0 — Motor Estadístico</div>
+          <div className="flex items-center gap-3 text-[10px] text-white/20">
+            <span>Confiabilidad: <span style={{ color: reliabilityConfig_.color }}>{reliabilityConfig_.label}</span></span>
+            <span>Dataset: {totalDecisive}/{datasetGoal}</span>
+            {autoTraderState?.isRunning && <span className="text-[#00ff88]">● AUTO ON</span>}
+          </div>
         </div>
       </footer>
     </div>
   );
 }
 
-// ─── Sub-Components ──────────────────────────────────────────────────────────
-
-function StatCard({
-  title,
-  value,
-  icon,
-  color,
-}: {
-  title: string;
-  value: string | number;
-  icon: React.ReactNode;
-  color: string;
-}) {
+// Missing icon fix - Settings is not in our imports, use a substitute
+function Settings({ className }: { className?: string }) {
   return (
-    <Card className="bg-[#111827] border-white/10">
-      <CardContent className="pt-4 pb-4">
-        <div className="flex items-center justify-between mb-2">
-          <span className="text-white/40 text-[10px] uppercase tracking-wider">{title}</span>
-          <div style={{ color }}>{icon}</div>
-        </div>
-        <p className="text-xl font-bold" style={{ color }}>
-          {value}
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
-
-function FilterItem({
-  title,
-  items,
-  color,
-  emptyText,
-}: {
-  title: string;
-  items: string[];
-  color: string;
-  emptyText: string;
-}) {
-  return (
-    <div className="bg-[#0a0e17] rounded-lg p-4 border border-white/5">
-      <p className="text-white/40 text-[10px] uppercase mb-2">{title}</p>
-      {items.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
-          {items.map((item) => (
-            <Badge
-              key={item}
-              className="text-[10px]"
-              style={{ backgroundColor: `${color}20`, color, borderColor: `${color}40` }}
-            >
-              {item}
-            </Badge>
-          ))}
-        </div>
-      ) : (
-        <p className="text-white/30 text-xs">{emptyText}</p>
-      )}
-    </div>
-  );
-}
-
-function AlertConfig({
-  title,
-  description,
-  icon,
-  active,
-}: {
-  title: string;
-  description: string;
-  icon: React.ReactNode;
-  active: boolean;
-}) {
-  return (
-    <div className="bg-[#0a0e17] rounded-lg p-3 border border-white/5 flex items-start gap-3">
-      <div className="mt-0.5">{icon}</div>
-      <div className="flex-1">
-        <div className="flex items-center justify-between">
-          <p className="text-white/80 text-xs font-medium">{title}</p>
-          {active && (
-            <Badge className="bg-[#00ff88]/15 text-[#00ff88] border border-[#00ff88]/30 text-[9px]">
-              ACTIVO
-            </Badge>
-          )}
-        </div>
-        <p className="text-white/40 text-[10px] mt-0.5">{description}</p>
-      </div>
-    </div>
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={className}>
+      <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/>
+      <circle cx="12" cy="12" r="3"/>
+    </svg>
   );
 }
