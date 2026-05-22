@@ -781,6 +781,20 @@ export default function TradingDashboard() {
     return () => clearInterval(interval);
   }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, activeTab]);
 
+  // Auto check-pending signals every 60 seconds (replaces frequent cron on Vercel Hobby)
+  useEffect(() => {
+    const checkPending = async () => {
+      try {
+        await fetch("/api/signals/check-pending", { method: "POST" });
+      } catch (err) { /* silent fail */ }
+    };
+    // Run once on mount
+    checkPending();
+    // Then every 60 seconds while the page is open
+    const interval = setInterval(checkPending, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
   // ─── Handlers ────────────────────────────────────────────────────────────
 
   const handleToggleAutoTrader = async (start: boolean) => {

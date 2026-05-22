@@ -8,8 +8,8 @@
   },
   "crons": [
     {
-      "path": "/api/signals/check-pending",
-      "schedule": "*/10 * * * *"
+      "path": "/api/signals/check-pending?cron=daily",
+      "schedule": "0 0 * * *"
     }
   ]
 }
