@@ -4,7 +4,8 @@
 // The goal is to BUILD THE DATASET - even if signals are bad, data is gold
 
 import { db } from './db';
-import { getCandles, generateNextCandle, getLatestPrice, ASSET_CONFIGS, generateHistoricalCandles } from './market-data';
+import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
+import { getCandles as getDBCandles, generateNextCandle, ASSET_CONFIGS, generateHistoricalCandles } from './market-data';
 import { computeAllIndicators, type IndicatorSnapshot } from './indicators';
 import { detectPatterns, getBestPattern, type DetectedPattern, type PatternType, PATTERN_DESCRIPTIONS } from './patterns';
 import { detectSession, shouldTradeSession, type SessionInfo, type SessionType } from './sessions';
@@ -50,10 +51,11 @@ export interface SignalGenerationResult {
   session: SessionType;
   confidence: number;
   setupScore: number;
-  analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK';
+  analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK' | 'DEMO';
   reason: string;
   indicators: IndicatorSnapshot | null;
   dataAvailability: Record<string, boolean>;
+  dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK';
   skipped: boolean;
   skipReason?: string;
 }
@@ -226,18 +228,34 @@ export async function generateAutoSignal(
   const now = new Date();
   const session = detectSession(now);
   
-  // Step 1: Get market data (candles)
-  let candles = await getCandles(asset, timeframe, 100);
+  // Step 1: Get market data - try REAL market engine first, then fall back to DB
+  let candles: any[] = [];
+  let dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK' = 'FALLBACK';
   
-  // If not enough candles, generate them
-  if (candles.length < 50) {
-    await generateHistoricalCandles(asset, timeframe, 200);
-    candles = await getCandles(asset, timeframe, 100);
+  // Try real market engine (Binance for crypto, TwelveData for forex)
+  try {
+    const engineResult = await getEngineCandles(asset, timeframe, 100);
+    if (engineResult.candles.length >= 30) {
+      candles = engineResult.candles;
+      dataSource = engineResult.source as any;
+    }
+  } catch (err) {
+    console.error('Market engine failed, falling back to DB:', err);
   }
   
-  // Also generate a new candle (advance time)
-  await generateNextCandle(asset, timeframe);
-  candles = await getCandles(asset, timeframe, 100);
+  // If real data not available, use DB/simulated candles
+  if (candles.length < 50) {
+    const dbCandles = await getDBCandles(asset, timeframe, 100);
+    if (dbCandles.length >= 30) {
+      candles = dbCandles;
+      dataSource = 'FALLBACK';
+    } else {
+      // Generate candles as last resort
+      await generateHistoricalCandles(asset, timeframe, 200);
+      candles = await getDBCandles(asset, timeframe, 100);
+      dataSource = 'FALLBACK';
+    }
+  }
   
   if (candles.length < 30) {
     return {
@@ -251,7 +269,8 @@ export async function generateAutoSignal(
       analysisMode: 'FALLBACK',
       reason: `Datos insuficientes: solo ${candles.length} velas disponibles. Mínimo 30 necesarias.`,
       indicators: null,
-      dataAvailability: { candles: false, indicators: false, patterns: false, session: true, volume: false },
+      dataAvailability: { candles: false, indicators: false, patterns: false, session: true, volume: false, realMarketData: false },
+      dataSource,
       skipped: true,
       skipReason: 'INSUFFICIENT_DATA',
     };
@@ -342,18 +361,28 @@ export async function generateAutoSignal(
     }
   }
   
-  // Step 9: Determine analysis mode
+  // Step 9: Determine analysis mode based on data source quality
   const dataAvailability: Record<string, boolean> = {
     candles: candles.length >= 50,
     indicators: indicators.rsi14 !== null,
     patterns: bestPattern !== null,
     session: true,
     volume: indicators.volumeAnalysis.avgVolume20 > 0,
+    realMarketData: dataSource === 'BINANCE' || dataSource === 'TWELVEDATA',
   };
   
   const availableCount = Object.values(dataAvailability).filter(Boolean).length;
-  const analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK' = 
-    availableCount >= 4 ? 'FULL' : availableCount >= 3 ? 'PARTIAL' : 'FALLBACK';
+  
+  // Analysis mode is primarily determined by data source
+  // Real API data = FULL, simulated = FALLBACK
+  let analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK' | 'DEMO';
+  if (dataSource === 'BINANCE' || dataSource === 'TWELVEDATA') {
+    analysisMode = availableCount >= 4 ? 'FULL' : 'PARTIAL';
+  } else if (dataSource === 'FALLBACK') {
+    analysisMode = 'FALLBACK';
+  } else {
+    analysisMode = 'DEMO';
+  }
   
   // Step 10: Determine statistical reliability
   const statisticalReliability = 
@@ -418,6 +447,7 @@ export async function generateAutoSignal(
     reason,
     indicators,
     dataAvailability,
+    dataSource,
     skipped: direction === 'NO_OPERAR',
     skipReason: direction === 'NO_OPERAR' ? reason : undefined,
   };

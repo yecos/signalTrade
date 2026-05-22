@@ -33,7 +33,8 @@ import {
   Clock, Zap, Target, Shield, Brain, Eye, Loader2, Play, Square,
   Sun, Moon, Globe, Flame, Crosshair, ChevronLeft, ChevronRight,
   Database, Sparkles, Wifi, WifiOff, Gauge, Timer, AlertOctagon,
-  ArrowUpRight, ArrowDownRight, CircleDot, Layers,
+  ArrowUpRight, ArrowDownRight, CircleDot, Layers, Key, Server,
+  Signal,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -208,6 +209,21 @@ interface SetupScoresResponse {
   };
 }
 
+// ─── Market Engine Types ────────────────────────────────────────────────────
+
+interface MarketEngineStatusPanel {
+  connected: boolean;
+  sources: Record<string, string>;
+  lastPrice: Record<string, number>;
+  lastUpdate: Record<string, string>;
+  latency: Record<string, number>;
+  dataQuality: string;
+  errors: string[];
+  binanceAvailable: boolean;
+  twelveDataAvailable: boolean;
+  twelveDataApiKeySet?: boolean;
+}
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const ASSETS = ["EUR/USD", "GBP/USD", "USD/JPY", "BTC/USD", "ETH/USD"];
@@ -303,9 +319,12 @@ function severityColor(severity: string): string {
 }
 
 function formatTime(iso: string): string {
-  return new Date(iso).toLocaleString("es-ES", {
-    day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit",
-  });
+  const d = new Date(iso);
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  const month = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const hour = String(d.getUTCHours()).padStart(2, "0");
+  const min = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${day}/${month} ${hour}:${min}`;
 }
 
 function formatPrice(price: number, asset: string): string {
@@ -320,6 +339,7 @@ function analysisModeConfig(mode: string | null): { label: string; color: string
     case "FULL": return { label: "FULL", color: "#00ff88", bg: "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" };
     case "PARTIAL": return { label: "PARCIAL", color: "#ffaa00", bg: "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30" };
     case "FALLBACK": return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
+    case "DEMO": return { label: "DEMO", color: "#666666", bg: "bg-white/10 text-white/50 border-white/20" };
     default: return { label: "FALLBACK", color: "#ff3366", bg: "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30" };
   }
 }
@@ -544,6 +564,14 @@ export default function TradingDashboard() {
   const [nextCountdown, setNextCountdown] = useState("");
   const [mounted, setMounted] = useState(false);
 
+  // Market engine state
+  const [marketEngineStatus, setMarketEngineStatus] = useState<MarketEngineStatusPanel | null>(null);
+  const [twelveDataApiKey, setTwelveDataApiKey] = useState("");
+  const [apiKeyLoading, setApiKeyLoading] = useState(false);
+
+  // Learning engine state
+  const [learningReport, setLearningReport] = useState<any>(null);
+
   // ─── Fetch functions ─────────────────────────────────────────────────────
 
   const fetchStats = useCallback(async () => {
@@ -604,8 +632,26 @@ export default function TradingDashboard() {
           setAutoTraderConfig(data.config);
           if (data.config.assets) setSelectedAssets(data.config.assets);
         }
+        // Also get market engine status from auto-trader response
+        if (data.marketStatus) {
+          setMarketEngineStatus({ ...data.marketStatus, twelveDataApiKeySet: data.marketStatus.twelveDataApiKeySet });
+        }
       }
     } catch (err) { console.error("Error fetching auto-trader:", err); }
+  }, []);
+
+  const fetchMarketEngineStatus = useCallback(async () => {
+    try {
+      const res = await fetch("/api/market-data?mode=status");
+      if (res.ok) setMarketEngineStatus(await res.json());
+    } catch (err) { console.error("Error fetching market engine status:", err); }
+  }, []);
+
+  const fetchLearningReport = useCallback(async () => {
+    try {
+      const res = await fetch("/api/learning");
+      if (res.ok) setLearningReport(await res.json());
+    } catch (err) { console.error("Error fetching learning report:", err); }
   }, []);
 
   // ─── Effects ─────────────────────────────────────────────────────────────
@@ -615,7 +661,8 @@ export default function TradingDashboard() {
     fetchAlerts();
     fetchAutoTrader();
     fetchSetupScores();
-  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores]);
+    fetchMarketEngineStatus();
+  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus]);
 
   useEffect(() => { fetchSignals(); }, [fetchSignals]);
 
@@ -623,7 +670,8 @@ export default function TradingDashboard() {
     if (activeTab === "backtesting" && !insights) fetchInsights();
     if (activeTab === "setup-scores") fetchSetupScores();
     if (activeTab === "auto-trader") fetchAutoTrader();
-  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader]);
+    if (activeTab === "learning" && !learningReport) fetchLearningReport();
+  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader, fetchLearningReport, learningReport]);
 
   // Auto-refresh every 10 seconds
   useEffect(() => {
@@ -633,9 +681,10 @@ export default function TradingDashboard() {
       if (activeTab === "historial") fetchSignals();
       if (activeTab === "auto-trader" || activeTab === "motor") fetchAutoTrader();
       if (activeTab === "setup-scores") fetchSetupScores();
+      if (activeTab === "motor") fetchMarketEngineStatus();
     }, 10000);
     return () => clearInterval(interval);
-  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, activeTab]);
+  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, activeTab]);
 
   // ─── Handlers ────────────────────────────────────────────────────────────
 
@@ -738,6 +787,45 @@ export default function TradingDashboard() {
     ]);
   }, []);
 
+  const handleSetApiKey = async () => {
+    if (!twelveDataApiKey.trim()) return;
+    setApiKeyLoading(true);
+    try {
+      const res = await fetch("/api/market-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "set-api-key", apiKey: twelveDataApiKey.trim() }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        addLiveFeed(data.message, data.health?.twelveData ? "success" : "skip");
+        fetchMarketEngineStatus();
+      }
+    } catch (err) { console.error("Error setting API key:", err); addLiveFeed("Error configurando API key", "error"); }
+    finally { setApiKeyLoading(false); }
+  };
+
+  const handleCheckHealth = async () => {
+    setApiKeyLoading(true);
+    try {
+      const res = await fetch("/api/market-data", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "check-health" }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const h = data.health;
+        addLiveFeed(
+          `Binance: ${h?.binance ? "OK" : "OFF"} (${h?.latency?.binance ?? -1}ms) | TwelveData: ${h?.twelveData ? "OK" : "OFF"} (${h?.latency?.twelveData ?? -1}ms)`,
+          h?.binance || h?.twelveData ? "success" : "error"
+        );
+        fetchMarketEngineStatus();
+      }
+    } catch (err) { console.error("Error checking health:", err); addLiveFeed("Error verificando APIs", "error"); }
+    finally { setApiKeyLoading(false); }
+  };
+
   // ─── Chart Data ──────────────────────────────────────────────────────────
 
   const assetChartData = stats
@@ -794,6 +882,19 @@ export default function TradingDashboard() {
   const datasetProgress = Math.min(100, ((totalDecisive || 0) / datasetGoal) * 100);
   const reliabilityLevel = stats?.statisticalReliability || "INSUFFICIENT";
   const reliabilityConfig_ = reliabilityConfig(reliabilityLevel);
+
+  // ─── Hydration Guard ─────────────────────────────────────────────────────
+
+  if (!mounted) {
+    return (
+      <div className="min-h-screen bg-[#0a0e17] flex items-center justify-center">
+        <div className="text-center">
+          <Loader2 className="size-8 text-[#00ff88] animate-spin mx-auto mb-3" />
+          <p className="text-white/40 text-sm">Cargando SignalTrader Pro...</p>
+        </div>
+      </div>
+    );
+  }
 
   // ─── Render ──────────────────────────────────────────────────────────────
 
@@ -857,6 +958,9 @@ export default function TradingDashboard() {
               <TabsTrigger value="alertas" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
                 <Bell className="size-3.5 mr-1" /> Alertas
               </TabsTrigger>
+              <TabsTrigger value="learning" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Brain className="size-3.5 mr-1" /> Learning
+              </TabsTrigger>
             </TabsList>
           </ScrollArea>
 
@@ -902,6 +1006,119 @@ export default function TradingDashboard() {
                     </div>
                   </div>
                   )}
+                </CardContent>
+              </Card>
+
+              {/* Market Status Panel */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-white text-sm flex items-center gap-2">
+                    <Server className="size-4 text-[#00ffcc]" /> Estado del Motor de Datos
+                    {marketEngineStatus?.connected ? (
+                      <Badge className="bg-[#00ff88]/20 text-[#00ff88] border-[#00ff88]/40 text-[10px]">
+                        <Wifi className="size-3 mr-1" /> CONECTADO
+                      </Badge>
+                    ) : (
+                      <Badge className="bg-[#ff3366]/20 text-[#ff3366] border-[#ff3366]/40 text-[10px]">
+                        <WifiOff className="size-3 mr-1" /> DESCONECTADO
+                      </Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-3">
+                    {/* Data Quality & Source Summary */}
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-white/40 uppercase">Calidad:</span>
+                          <Badge className={`text-[10px] px-1.5 py-0 border ${
+                            marketEngineStatus?.dataQuality === "HIGH" ? "bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30" :
+                            marketEngineStatus?.dataQuality === "MEDIUM" ? "bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30" :
+                            marketEngineStatus?.dataQuality === "LOW" ? "bg-[#ff8800]/15 text-[#ff8800] border-[#ff8800]/30" :
+                            "bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30"
+                          }`}>
+                            {marketEngineStatus?.dataQuality || "OFFLINE"}
+                          </Badge>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-white/40">Binance:</span>
+                          <span className={`text-[10px] font-medium ${marketEngineStatus?.binanceAvailable ? "text-[#00ff88]" : "text-[#ff3366]"}`}>
+                            {marketEngineStatus?.binanceAvailable ? "● ACTIVO" : "○ OFF"}
+                          </span>
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-white/40">TwelveData:</span>
+                          <span className={`text-[10px] font-medium ${marketEngineStatus?.twelveDataAvailable ? "text-[#00ff88]" : "text-[#ff3366]"}`}>
+                            {marketEngineStatus?.twelveDataAvailable ? "● ACTIVO" : "○ OFF"}
+                          </span>
+                        </div>
+                      </div>
+                      <Button variant="ghost" size="sm" onClick={handleCheckHealth} disabled={apiKeyLoading} className="text-white/50 hover:text-white hover:bg-white/10 text-[10px] h-6">
+                        <Signal className="size-3 mr-1" /> Check APIs
+                      </Button>
+                    </div>
+
+                    {/* Per-Asset Source Table */}
+                    <div className="grid grid-cols-1 sm:grid-cols-5 gap-1.5">
+                      {ASSETS.map((asset) => {
+                        const src = marketEngineStatus?.sources?.[asset] || "OFFLINE";
+                        const price = marketEngineStatus?.lastPrice?.[asset];
+                        const lat = marketEngineStatus?.latency?.[asset];
+                        const srcColor = src === "BINANCE" ? "#00ff88" : src === "TWELVEDATA" ? "#00aaff" : src === "FALLBACK" ? "#ff8800" : "#ff3366";
+                        const srcLabel = src === "BINANCE" ? "BIN" : src === "TWELVEDATA" ? "12D" : src === "FALLBACK" ? "SIM" : "OFF";
+                        return (
+                          <div key={asset} className="p-2 rounded-lg bg-white/5 flex flex-col gap-0.5">
+                            <div className="flex items-center justify-between">
+                              <span className="text-[10px] text-white/70 font-medium">{asset}</span>
+                              <Badge className="text-[8px] px-1 py-0 border" style={{ backgroundColor: `${srcColor}15`, color: srcColor, borderColor: `${srcColor}30` }}>
+                                {srcLabel}
+                              </Badge>
+                            </div>
+                            <div className="text-[11px] font-mono text-white">
+                              {price ? formatPrice(price, asset) : "—"}
+                            </div>
+                            {lat !== undefined && lat >= 0 && (
+                              <div className="text-[8px] text-white/30">{lat}ms</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    {/* API Key Input */}
+                    <div className="flex items-center gap-2 pt-1 border-t border-white/5">
+                      <Key className="size-3 text-white/30" />
+                      <span className="text-[10px] text-white/40 whitespace-nowrap">TwelveData API Key:</span>
+                      <Input
+                        type="password"
+                        value={twelveDataApiKey}
+                        onChange={(e) => setTwelveDataApiKey(e.target.value)}
+                        placeholder={marketEngineStatus?.twelveDataApiKeySet ? "●●●● (configurada)" : "Introduce tu API key..."}
+                        className="bg-[#0a0e17] border-white/10 text-white text-[10px] h-6 flex-1"
+                      />
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        onClick={handleSetApiKey}
+                        disabled={apiKeyLoading || !twelveDataApiKey.trim()}
+                        className="border-white/20 text-white/70 hover:text-white hover:bg-white/10 text-[10px] h-6 px-2"
+                      >
+                        {apiKeyLoading ? <Loader2 className="size-3 animate-spin" /> : "Guardar"}
+                      </Button>
+                    </div>
+
+                    {/* Errors */}
+                    {marketEngineStatus?.errors && marketEngineStatus.errors.length > 0 && (
+                      <div className="space-y-1">
+                        {marketEngineStatus.errors.slice(0, 3).map((err, i) => (
+                          <div key={i} className="text-[9px] text-[#ff8800]/70 bg-[#ff8800]/5 px-2 py-1 rounded">
+                            {err}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </CardContent>
               </Card>
 
@@ -2040,13 +2257,254 @@ export default function TradingDashboard() {
             </motion.div>
           </TabsContent>
 
+          {/* ─── TAB 8: LEARNING ENGINE ──────────────────────────────────────── */}
+          <TabsContent value="learning">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* Learning Engine Header */}
+              <Card className="bg-gradient-to-r from-[#111827] to-[#0d1220] border-[#aa66ff]/20">
+                <CardContent className="p-4">
+                  <div className="flex items-center justify-between flex-wrap gap-3">
+                    <div className="flex items-center gap-3">
+                      <div className="w-10 h-10 rounded-xl bg-[#aa66ff]/15 flex items-center justify-center">
+                        <Brain className="size-5 text-[#aa66ff]" />
+                      </div>
+                      <div>
+                        <div className="text-sm font-bold text-[#aa66ff]">MOTOR DE APRENDIZAJE</div>
+                        <div className="text-xs text-white/40">Descubre qué setups funcionan y cuándo</div>
+                      </div>
+                    </div>
+                    <Button variant="outline" size="sm" onClick={fetchLearningReport} className="border-[#aa66ff]/30 text-[#aa66ff] hover:text-white hover:bg-[#aa66ff]/10 text-xs">
+                      <RefreshCw className="size-3 mr-1" /> Actualizar Análisis
+                    </Button>
+                  </div>
+                </CardContent>
+              </Card>
+
+              {!learningReport ? (
+                <Card className="bg-[#111827] border-white/10">
+                  <CardContent className="p-8 text-center">
+                    <Brain className="size-12 text-[#aa66ff]/20 mx-auto mb-3" />
+                    <p className="text-white/40 text-sm mb-3">Carga el análisis de aprendizaje para descubrir edges</p>
+                    <Button onClick={fetchLearningReport} variant="outline" className="border-[#aa66ff]/30 text-[#aa66ff] hover:text-white hover:bg-[#aa66ff]/10">
+                      <Brain className="size-4 mr-2" /> Analizar Dataset
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : (
+                <>
+                  {/* Dataset Health */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                    <StatCard title="Total Datos" value={learningReport.totalDataPoints || 0} icon={<Database className="size-4" />} color={NEON_BLUE} />
+                    <StatCard title="Decisivas" value={learningReport.totalDecisive || 0} icon={<Target className="size-4" />} color={NEON_CYAN} />
+                    <StatCard title="Win Rate Global" value={`${learningReport.overallWinRate?.toFixed(1) || 0}%`} icon={<Activity className="size-4" />} color={learningReport.overallWinRate >= 55 ? NEON_GREEN : NEON_RED} />
+                    <StatCard title="Calidad Datos" value={learningReport.dataQuality || "INSUFFICIENT"} icon={<Gauge className="size-4" />} color={learningReport.dataQuality === "GOOD" || learningReport.dataQuality === "EXCELLENT" ? NEON_GREEN : learningReport.dataQuality === "ACCEPTABLE" ? NEON_YELLOW : NEON_RED} />
+                    <StatCard title="Edge Detectado" value={learningReport.hasAnyEdge ? "SÍ" : "NO"} icon={<Zap className="size-4" />} color={learningReport.hasAnyEdge ? NEON_GREEN : NEON_RED} />
+                    <StatCard title="Faltan para 1000" value={learningReport.datasetHealth?.neededForExcellent || 0} icon={<Timer className="size-4" />} color={NEON_YELLOW} />
+                  </div>
+
+                  {/* Next Milestone */}
+                  <Card className="bg-[#111827] border-white/10">
+                    <CardContent className="p-4">
+                      <div className="flex items-center gap-3">
+                        <Timer className="size-5 text-[#ffaa00]" />
+                        <div>
+                          <div className="text-xs text-white/40">Próximo hito</div>
+                          <div className="text-sm text-white/70">{learningReport.nextMilestone}</div>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+
+                  {/* Warnings */}
+                  {learningReport.warnings && learningReport.warnings.length > 0 && (
+                    <Card className="bg-[#ff3366]/5 border-[#ff3366]/20">
+                      <CardContent className="p-4 space-y-2">
+                        {learningReport.warnings.map((w: string, i: number) => (
+                          <div key={i} className="flex items-start gap-2">
+                            <AlertTriangle className="size-4 text-[#ff3366] mt-0.5 shrink-0" />
+                            <span className="text-xs text-[#ff3366]/80">{w}</span>
+                          </div>
+                        ))}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Recommendations */}
+                  {learningReport.recommendations && learningReport.recommendations.length > 0 && (
+                    <Card className="bg-[#00ff88]/5 border-[#00ff88]/20">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-white text-sm flex items-center gap-2">
+                          <CheckCircle className="size-4 text-[#00ff88]" /> Recomendaciones
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent className="space-y-2">
+                        {learningReport.recommendations.map((r: string, i: number) => (
+                          <div key={i} className="flex items-start gap-2">
+                            <CheckCircle className="size-3 text-[#00ff88] mt-0.5 shrink-0" />
+                            <span className="text-xs text-[#00ff88]/80">{r}</span>
+                          </div>
+                        ))}
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Edge Discoveries Table */}
+                  {learningReport.discoveries && learningReport.discoveries.length > 0 && (
+                    <Card className="bg-[#111827] border-white/10">
+                      <CardHeader>
+                        <CardTitle className="text-white text-sm flex items-center gap-2">
+                          <Sparkles className="size-4 text-[#aa66ff]" /> Descubrimientos de Edge
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <ScrollArea className="w-full">
+                          <Table>
+                            <TableHeader>
+                              <TableRow className="border-white/10 hover:bg-transparent">
+                                <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Activo</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Total</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Win Rate</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Magnitud</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">p-valor</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Signif.</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Régimen</TableHead>
+                                <TableHead className="text-white/50 text-[10px]">Recom.</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {learningReport.discoveries.map((d: any, i: number) => (
+                                <TableRow key={i} className="border-white/5 hover:bg-white/5">
+                                  <TableCell><PatternBadge pattern={d.patternType} /></TableCell>
+                                  <TableCell><SessionBadge session={d.session} /></TableCell>
+                                  <TableCell className="text-white/70 text-[10px]">{d.asset || "Todos"}</TableCell>
+                                  <TableCell className="text-white text-[10px]">{d.totalSignals}</TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: d.winRate >= 55 ? NEON_GREEN : d.winRate >= 50 ? NEON_YELLOW : NEON_RED }}>
+                                    {d.winRate.toFixed(1)}%
+                                  </TableCell>
+                                  <TableCell>
+                                    <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${edgeColor(d.edge)}15`, color: edgeColor(d.edge), borderColor: `${edgeColor(d.edge)}30` }}>
+                                      {edgeLabel(d.edge)}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: d.edgeMagnitude > 10 ? NEON_GREEN : d.edgeMagnitude > 5 ? NEON_YELLOW : "#666" }}>
+                                    {d.edgeMagnitude.toFixed(1)}
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono text-white/50">
+                                    {d.pValue.toFixed(3)}
+                                  </TableCell>
+                                  <TableCell>
+                                    {d.isSignificant ? (
+                                      <CheckCircle className="size-3 text-[#00ff88]" />
+                                    ) : (
+                                      <XCircle className="size-3 text-white/20" />
+                                    )}
+                                  </TableCell>
+                                  <TableCell>
+                                    <div className="flex items-center gap-1">
+                                      <span className={`text-[9px] ${d.regimeDirection === 'IMPROVING' ? 'text-[#00ff88]' : d.regimeDirection === 'DECLINING' ? 'text-[#ff3366]' : 'text-white/30'}`}>
+                                        {d.regimeDirection === 'IMPROVING' ? '↑' : d.regimeDirection === 'DECLINING' ? '↓' : '→'}
+                                      </span>
+                                      {d.regimeChange && <AlertTriangle className="size-3 text-[#ffaa00]" />}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="text-[9px] max-w-[120px] truncate" title={d.recommendation}>
+                                    <span style={{ color: d.edge === 'POSITIVE' ? NEON_GREEN : d.edge === 'NEGATIVE' ? NEON_RED : '#666' }}>
+                                      {d.recommendation.split(':')[0]}
+                                    </span>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </ScrollArea>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Best/Worst Setup Highlight */}
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    {learningReport.bestSetup && (
+                      <Card className="bg-[#00ff88]/5 border-[#00ff88]/20">
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-[#00ff88] text-sm flex items-center gap-2">
+                            <TrendingUp className="size-4" /> Mejor Setup
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <PatternBadge pattern={learningReport.bestSetup.patternType} />
+                              <SessionBadge session={learningReport.bestSetup.session} />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 text-[10px]">
+                              <div>
+                                <span className="text-white/40">Win Rate</span>
+                                <div className="font-mono text-[#00ff88]">{learningReport.bestSetup.winRate.toFixed(1)}%</div>
+                              </div>
+                              <div>
+                                <span className="text-white/40">Muestras</span>
+                                <div className="font-mono text-white">{learningReport.bestSetup.totalSignals}</div>
+                              </div>
+                              <div>
+                                <span className="text-white/40">p-valor</span>
+                                <div className="font-mono text-white">{learningReport.bestSetup.pValue.toFixed(3)}</div>
+                              </div>
+                            </div>
+                            <p className="text-[10px] text-[#00ff88]/60 italic">{learningReport.bestSetup.recommendation}</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+
+                    {learningReport.worstSetup && (
+                      <Card className="bg-[#ff3366]/5 border-[#ff3366]/20">
+                        <CardHeader className="pb-2">
+                          <CardTitle className="text-[#ff3366] text-sm flex items-center gap-2">
+                            <TrendingDown className="size-4" /> Peor Setup
+                          </CardTitle>
+                        </CardHeader>
+                        <CardContent>
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-2">
+                              <PatternBadge pattern={learningReport.worstSetup.patternType} />
+                              <SessionBadge session={learningReport.worstSetup.session} />
+                            </div>
+                            <div className="grid grid-cols-3 gap-2 text-[10px]">
+                              <div>
+                                <span className="text-white/40">Win Rate</span>
+                                <div className="font-mono text-[#ff3366]">{learningReport.worstSetup.winRate.toFixed(1)}%</div>
+                              </div>
+                              <div>
+                                <span className="text-white/40">Muestras</span>
+                                <div className="font-mono text-white">{learningReport.worstSetup.totalSignals}</div>
+                              </div>
+                              <div>
+                                <span className="text-white/40">p-valor</span>
+                                <div className="font-mono text-white">{learningReport.worstSetup.pValue.toFixed(3)}</div>
+                              </div>
+                            </div>
+                            <p className="text-[10px] text-[#ff3366]/60 italic">{learningReport.worstSetup.recommendation}</p>
+                          </div>
+                        </CardContent>
+                      </Card>
+                    )}
+                  </div>
+                </>
+              )}
+            </motion.div>
+          </TabsContent>
+
         </Tabs>
       </main>
 
       {/* Footer */}
       <footer className="border-t border-white/5 mt-8">
         <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="text-[10px] text-white/20">SignalTrader Pro v2.0 — Motor Estadístico</div>
+          <div className="text-[10px] text-white/20">SignalTrader Pro v3.0 — Motor Estadístico Real</div>
           <div className="flex items-center gap-3 text-[10px] text-white/20">
             <span>Confiabilidad: <span style={{ color: reliabilityConfig_.color }}>{reliabilityConfig_.label}</span></span>
             <span>Dataset: {totalDecisive}/{datasetGoal}</span>

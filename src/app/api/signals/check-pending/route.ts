@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { evaluateSignal, simulateExitPrice, checkAlerts } from "@/lib/signals";
-import { getLatestPrice } from "@/lib/market-data";
+import { getLatestPrice as getEngineLatestPrice } from "@/lib/market-engine";
+import { getLatestPrice as getDBLatestPrice } from "@/lib/market-data";
 import { updateSetupStats } from "@/lib/auto-trader";
 
 export async function POST() {
@@ -29,21 +30,30 @@ export async function POST() {
     let closedCount = 0;
 
     for (const signal of expiredSignals) {
-      // Try to get real price from market data engine, fallback to simulation
+      // Try to get real price from market engine first, then DB, then simulate
       let exitPrice: number;
       try {
-        const latestPrice = await getLatestPrice(signal.asset);
-        if (latestPrice && latestPrice > 0) {
-          // Use market data with slight random variation for realistic verification
+        // Try real market engine (Binance/TwelveData)
+        const engineResult = await getEngineLatestPrice(signal.asset);
+        const latestPrice = engineResult.price;
+        if (latestPrice && latestPrice > 0 && engineResult.source !== 'FALLBACK') {
+          // Use real market price with slight variation for realistic verification
           const variation = latestPrice * (Math.random() * 0.001 - 0.0005);
           exitPrice = latestPrice + variation;
-          // Round appropriately for asset type
-          if (signal.asset.includes('JPY')) exitPrice = Math.round(exitPrice * 100) / 100;
-          else if (signal.asset.includes('BTC') || signal.asset.includes('ETH')) exitPrice = Math.round(exitPrice * 100) / 100;
-          else exitPrice = Math.round(exitPrice * 100000) / 100000;
         } else {
-          exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+          // Try DB price
+          const dbPrice = await getDBLatestPrice(signal.asset);
+          if (dbPrice && dbPrice > 0) {
+            const variation = dbPrice * (Math.random() * 0.001 - 0.0005);
+            exitPrice = dbPrice + variation;
+          } else {
+            exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
+          }
         }
+        // Round appropriately for asset type
+        if (signal.asset.includes('JPY')) exitPrice = Math.round(exitPrice * 100) / 100;
+        else if (signal.asset.includes('BTC') || signal.asset.includes('ETH')) exitPrice = Math.round(exitPrice * 100) / 100;
+        else exitPrice = Math.round(exitPrice * 100000) / 100000;
       } catch {
         exitPrice = simulateExitPrice(signal.entryPrice, signal.direction);
       }
