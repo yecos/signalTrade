@@ -23,6 +23,10 @@ const WORKER_PORT = parseInt(process.env.WORKER_PORT || '3111');
 const CYCLE_INTERVAL_MS = parseInt(process.env.CYCLE_INTERVAL_MS || '300000'); // 5 min
 const STATUS_PORT = parseInt(process.env.STATUS_PORT || '3112');
 
+// Parse CLI args
+const CLI_ARGS = process.argv.slice(2);
+const AUTO_START = CLI_ARGS.includes('--auto') || CLI_ARGS.includes('--auto-start') || process.env.AUTO_START === 'true';
+
 // ─── State ──────────────────────────────────────────────────────────────────
 interface WorkerState {
   isRunning: boolean;
@@ -595,13 +599,64 @@ async function main(): Promise<void> {
     log('WARN', `Market Engine no disponible: ${err.message}`);
   }
 
-  // Check auto-trader state from DB
-  try {
-    const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
-    state.autoTraderEnabled = runningSetting?.value === 'true';
-    log('INFO', `Auto-Trader: ${state.autoTraderEnabled ? '✅ ACTIVADO' : '⏹ Desactivado (actívalo en http://localhost:' + STATUS_PORT + '/activate)'}`);
-  } catch {
-    log('INFO', `Auto-Trader: ⏹ Desactivado (actívalo en http://localhost:${STATUS_PORT}/activate)`);
+  // ─── AUTO-START: Apply optimal config and activate auto-trader automatically ────
+  if (AUTO_START) {
+    log('INFO', '🚀 AUTO-START: Configurando automáticamente...');
+
+    // Apply optimal config
+    const optimalConfig = {
+      enabled: true,
+      assets: ['BTC/USD', 'ETH/USD'],
+      timeframe: 'M5',
+      intervalMinutes: 5,
+      expirationMinutes: 40,
+      minSetupScore: 15,
+      maxConcurrentSignals: 20,
+      confidenceBoost: 0,
+      noOperarThreshold: 20,
+      strictMode: true,
+    };
+
+    try {
+      await db.appSettings.upsert({
+        where: { key: 'autoTraderConfig' },
+        create: { key: 'autoTraderConfig', value: JSON.stringify(optimalConfig), description: 'Optimal config (auto-start)' },
+        update: { value: JSON.stringify(optimalConfig) },
+      });
+      log('INFO', '  ✅ Config óptima aplicada (strict mode, BTC+ETH, 40min expiry)');
+    } catch (err: any) {
+      log('WARN', `  ⚠️ Error aplicando config: ${err.message}`);
+    }
+
+    // Activate auto-trader
+    try {
+      await db.appSettings.upsert({
+        where: { key: 'autoTraderRunning' },
+        create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
+        update: { value: 'true' },
+      });
+      state.autoTraderEnabled = true;
+      log('INFO', '  ✅ Auto-Trader ACTIVADO automáticamente');
+    } catch (err: any) {
+      log('WARN', `  ⚠️ Error activando auto-trader: ${err.message}`);
+    }
+
+    log('INFO', '🚀 AUTO-START completo — Worker listo para operar');
+    log('INFO', '');
+    log('INFO', '  📊 Proven Edges activos:');
+    log('INFO', '    TIER_1: liq_sweep+NY+BTC 66.7%, liq_sweep+Asia+BTC 62.2%, liq_sweep+Overlap+ETH 61.1%');
+    log('INFO', '    TIER_2: liq_sweep+NY+ETH 58.2%, liq_sweep+London+BTC 55.7%, fakeout+Asia+ETH 56.5%');
+    log('INFO', '  🚫 Patrones bloqueados: breakout, trend_continuation, none');
+    log('INFO', '');
+  } else {
+    // Check auto-trader state from DB
+    try {
+      const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
+      state.autoTraderEnabled = runningSetting?.value === 'true';
+      log('INFO', `Auto-Trader: ${state.autoTraderEnabled ? '✅ ACTIVADO' : '⏹ Desactivado (actívalo con --auto o http://localhost:' + STATUS_PORT + '/activate)'}`);
+    } catch {
+      log('INFO', `Auto-Trader: ⏹ Desactivado (actívalo con --auto o http://localhost:${STATUS_PORT}/activate)`);
+    }
   }
 
   // Start status server FIRST (keeps process alive)
