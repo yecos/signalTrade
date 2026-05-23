@@ -770,6 +770,8 @@ export async function generateAutoSignal(
   }
   
   // Step 13: Save signal to database with ALL new fields
+  // NO_OPERAR signals are saved as CLOSED immediately (they don't need verification)
+  const isNoOperar = direction === 'NO_OPERAR';
   const signalData = {
     asset,
     timeframe,
@@ -784,6 +786,8 @@ export async function generateAutoSignal(
     sessionType: session.session,
     setupScore,
     source: 'AUTO',
+    status: isNoOperar ? 'CLOSED' : 'PENDING',
+    result: isNoOperar ? 'NO_OPERAR' : null,
     analysisMode,
     dataAvailability: JSON.stringify(dataAvailability),
     statisticalReliability,

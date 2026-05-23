@@ -204,6 +204,8 @@ const BLOCKED_PATTERNS: Record<string, { wr: number; reason: string }> = {
     wr: 48.9,
     reason: 'Sin patrón detectado — Random walk, sin edge',
   },
+  // momentum_shift is NOT blocked — it's a new pattern for data collection
+  // When enough data is collected, it will be classified based on actual WR
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -219,6 +221,7 @@ const PATTERN_OVERALL: Record<string, { wr: number; wins: number; losses: number
   'breakout':        { wr: 45.6, wins: 442, losses: 528, total: 970 },
   'trend_continuation': { wr: 46.8, wins: 1240, losses: 1406, total: 2649 },
   'none':            { wr: 48.9, wins: 3545, losses: 3703, total: 7256 },
+  'momentum_shift':  { wr: 52.0, wins: 0, losses: 0, total: 0 }, // NEW — estimate, collecting data
 };
 
 // ══════════════════════════════════════════════════════════════════════════════

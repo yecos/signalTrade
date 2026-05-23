@@ -1,6 +1,8 @@
-// PATTERN ENGINE
+// PATTERN ENGINE v2 — Wider detection window + new momentum_shift pattern
 // Detects chart patterns from candle data + indicators
-// Patterns: breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation
+// Patterns: breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation, momentum_shift
+// v2: Scans last 3 candles for pattern formations (not just the very last candle)
+//     Added momentum_shift for detecting indicator-driven directional signals
 
 import type { Candle } from './market-data';
 import type { IndicatorSnapshot } from './indicators';
@@ -13,7 +15,8 @@ export type PatternType =
   | 'engulfing' 
   | 'fakeout' 
   | 'reversal' 
-  | 'trend_continuation';
+  | 'trend_continuation'
+  | 'momentum_shift';
 
 export interface DetectedPattern {
   type: PatternType;
@@ -35,51 +38,56 @@ export function detectPatterns(candles: Candle[], indicators?: IndicatorSnapshot
   
   const ind = indicators || computeAllIndicators(candles);
   const patterns: DetectedPattern[] = [];
+  const seen = new Set<string>(); // avoid duplicates from multi-candle scan
   
-  const last = candles.length - 1;
-  const currentPrice = candles[last].close;
-  const prevPrice = candles[last - 1].close;
-  const prev2Price = candles[last - 2].close;
-  
-  // === BREAKOUT ===
-  const breakout = detectBreakout(candles, ind);
-  if (breakout) patterns.push(breakout);
-  
-  // === LIQUIDITY SWEEP ===
-  const liqSweep = detectLiquiditySweep(candles, ind);
-  if (liqSweep) patterns.push(liqSweep);
-  
-  // === ENGULFING ===
-  const engulfing = detectEngulfing(candles, ind);
-  if (engulfing) patterns.push(engulfing);
-  
-  // === FAKEOUT ===
-  const fakeout = detectFakeout(candles, ind);
-  if (fakeout) patterns.push(fakeout);
-  
-  // === REVERSAL ===
-  const reversal = detectReversal(candles, ind);
-  if (reversal) patterns.push(reversal);
-  
-  // === TREND CONTINUATION ===
-  const trendCont = detectTrendContinuation(candles, ind);
-  if (trendCont) patterns.push(trendCont);
+  const tryAdd = (p: DetectedPattern | null) => {
+    if (p && !seen.has(p.type + p.direction)) {
+      seen.add(p.type + p.direction);
+      patterns.push(p);
+    }
+  };
+
+  // Scan last 3 candles for patterns (not just the very last one)
+  // This dramatically increases detection rate on M5 timeframe
+  for (let offset = 0; offset <= 2; offset++) {
+    const idx = candles.length - 1 - offset;
+    if (idx < 5) break;
+
+    // === BREAKOUT (look at candle at idx vs BB) ===
+    tryAdd(detectBreakoutAt(candles, ind, idx));
+
+    // === LIQUIDITY SWEEP (look at candle at idx vs recent range) ===
+    tryAdd(detectLiquiditySweepAt(candles, ind, idx));
+
+    // === ENGULFING (look at pair idx, idx-1) ===
+    tryAdd(detectEngulfingAt(candles, ind, idx));
+
+    // === FAKEOUT (look at pair idx, idx-1) ===
+    tryAdd(detectFakeoutAt(candles, ind, idx));
+
+    // === REVERSAL (look at candle at idx + RSI) ===
+    tryAdd(detectReversalAt(candles, ind, idx));
+
+    // === TREND CONTINUATION (look at candle at idx) ===
+    tryAdd(detectTrendContinuationAt(candles, ind, idx));
+  }
+
+  // === MOMENTUM SHIFT (indicator-based, not time-specific) ===
+  tryAdd(detectMomentumShift(candles, ind));
   
   return patterns;
 }
 
 // === BREAKOUT DETECTION ===
-// Price breaks above/below Bollinger Band or recent range with volume
+// Price breaks above/below Bollinger Band with volume
 
-function detectBreakout(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  const currentPrice = candles[last].close;
-  const prevClose = candles[last - 1].close;
+function detectBreakoutAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  const currentPrice = candles[idx].close;
+  const prevClose = candles[idx - 1].close;
   
-  // Need Bollinger Bands
   if (!ind.bbUpper || !ind.bbLower || !ind.bbMiddle) return null;
   
-  // Bullish breakout: price breaks above upper BB with volume
+  // Bullish breakout: price breaks above upper BB
   if (currentPrice > ind.bbUpper && prevClose <= ind.bbUpper) {
     const volConf = ind.volumeAnalysis.volumeSpike ? 20 : 0;
     const trendConf = ind.trend === 'BULLISH' ? 15 : ind.trend === 'RANGING' ? 5 : -10;
@@ -90,7 +98,7 @@ function detectBreakout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatt
       type: 'breakout',
       direction: 'BULLISH',
       confidence,
-      description: `Breakout alcista: precio ${currentPrice.toFixed(5)} rompe BB superior ${ind.bbUpper.toFixed(5)} con ${ind.volumeAnalysis.volumeSpike ? 'spike de volumen' : 'volumen normal'}`,
+      description: `Breakout alcista: precio ${currentPrice.toFixed(2)} rompe BB superior ${ind.bbUpper.toFixed(2)} con ${ind.volumeAnalysis.volumeSpike ? 'spike de volumen' : 'volumen normal'}`,
       keyLevels: {
         entry: currentPrice,
         stopLoss: ind.bbMiddle,
@@ -100,7 +108,7 @@ function detectBreakout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatt
     };
   }
   
-  // Bearish breakout: price breaks below lower BB with volume
+  // Bearish breakout: price breaks below lower BB
   if (currentPrice < ind.bbLower && prevClose >= ind.bbLower) {
     const volConf = ind.volumeAnalysis.volumeSpike ? 20 : 0;
     const trendConf = ind.trend === 'BEARISH' ? 15 : ind.trend === 'RANGING' ? 5 : -10;
@@ -111,7 +119,7 @@ function detectBreakout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatt
       type: 'breakout',
       direction: 'BEARISH',
       confidence,
-      description: `Breakout bajista: precio ${currentPrice.toFixed(5)} rompe BB inferior ${ind.bbLower.toFixed(5)} con ${ind.volumeAnalysis.volumeSpike ? 'spike de volumen' : 'volumen normal'}`,
+      description: `Breakout bajista: precio ${currentPrice.toFixed(2)} rompe BB inferior ${ind.bbLower.toFixed(2)} con ${ind.volumeAnalysis.volumeSpike ? 'spike de volumen' : 'volumen normal'}`,
       keyLevels: {
         entry: currentPrice,
         stopLoss: ind.bbMiddle,
@@ -127,21 +135,20 @@ function detectBreakout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatt
 // === LIQUIDITY SWEEP DETECTION ===
 // Price sweeps beyond recent high/low then reverses sharply
 
-function detectLiquiditySweep(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  if (last < 20) return null;
+function detectLiquiditySweepAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  if (idx < 20) return null;
   
-  // Find recent swing highs and lows (last 20 candles)
-  const recentCandles = candles.slice(last - 20, last + 1);
+  // Find recent swing highs and lows (20 candles before idx)
+  const recentCandles = candles.slice(idx - 20, idx + 1);
   const highs = recentCandles.map(c => c.high);
   const lows = recentCandles.map(c => c.low);
   const maxHigh = Math.max(...highs.slice(0, -1)); // exclude current
   const minLow = Math.min(...lows.slice(0, -1));
   
-  const currentHigh = candles[last].high;
-  const currentLow = candles[last].low;
-  const currentClose = candles[last].close;
-  const currentOpen = candles[last].open;
+  const currentHigh = candles[idx].high;
+  const currentLow = candles[idx].low;
+  const currentClose = candles[idx].close;
+  const currentOpen = candles[idx].open;
   
   // Bullish liquidity sweep: price dips below recent low then reverses up
   if (currentLow < minLow && currentClose > currentOpen && currentClose > minLow) {
@@ -152,7 +159,7 @@ function detectLiquiditySweep(candles: Candle[], ind: IndicatorSnapshot): Detect
       type: 'liquidity_sweep',
       direction: 'BULLISH',
       confidence,
-      description: `Liquidity sweep alcista: precio barre mínimo ${minLow.toFixed(5)} y revierte con vela alcista. Body ratio: ${(bodyRatio * 100).toFixed(0)}%`,
+      description: `Liquidity sweep alcista: precio barre minimo ${minLow.toFixed(2)} y revierte con vela alcista. Body ratio: ${(bodyRatio * 100).toFixed(0)}%`,
       keyLevels: {
         entry: currentClose,
         stopLoss: currentLow,
@@ -171,7 +178,7 @@ function detectLiquiditySweep(candles: Candle[], ind: IndicatorSnapshot): Detect
       type: 'liquidity_sweep',
       direction: 'BEARISH',
       confidence,
-      description: `Liquidity sweep bajista: precio barre máximo ${maxHigh.toFixed(5)} y revierte con vela bajista. Body ratio: ${(bodyRatio * 100).toFixed(0)}%`,
+      description: `Liquidity sweep bajista: precio barre maximo ${maxHigh.toFixed(2)} y revierte con vela bajista. Body ratio: ${(bodyRatio * 100).toFixed(0)}%`,
       keyLevels: {
         entry: currentClose,
         stopLoss: currentHigh,
@@ -187,12 +194,11 @@ function detectLiquiditySweep(candles: Candle[], ind: IndicatorSnapshot): Detect
 // === ENGULFING DETECTION ===
 // Current candle engulfs previous candle completely
 
-function detectEngulfing(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  if (last < 1) return null;
+function detectEngulfingAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  if (idx < 1) return null;
   
-  const curr = candles[last];
-  const prev = candles[last - 1];
+  const curr = candles[idx];
+  const prev = candles[idx - 1];
   
   // Bullish engulfing: current bullish candle engulfs previous bearish
   if (
@@ -256,13 +262,11 @@ function detectEngulfing(candles: Candle[], ind: IndicatorSnapshot): DetectedPat
 // === FAKEOUT DETECTION ===
 // Breakout that fails - price breaks key level then returns inside range
 
-function detectFakeout(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  if (last < 5 || !ind.bbUpper || !ind.bbLower) return null;
+function detectFakeoutAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  if (idx < 2 || !ind.bbUpper || !ind.bbLower) return null;
   
-  const curr = candles[last];
-  const prev1 = candles[last - 1];
-  const prev2 = candles[last - 2];
+  const curr = candles[idx];
+  const prev1 = candles[idx - 1];
   
   // Bullish fakeout: previous candle broke above BB, current falls back inside
   if (prev1.high > ind.bbUpper && curr.close < ind.bbUpper && curr.close < curr.open) {
@@ -272,7 +276,7 @@ function detectFakeout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatte
       type: 'fakeout',
       direction: 'BEARISH', // fakeout bullish = bearish signal
       confidence,
-      description: `Fakeout alcista: precio rompió BB superior ${ind.bbUpper.toFixed(5)} pero volvió dentro. Señal bajista.`,
+      description: `Fakeout alcista: precio rompio BB superior ${ind.bbUpper.toFixed(2)} pero volvio dentro. Senal bajista.`,
       keyLevels: {
         entry: curr.close,
         stopLoss: prev1.high,
@@ -290,7 +294,7 @@ function detectFakeout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatte
       type: 'fakeout',
       direction: 'BULLISH', // fakeout bearish = bullish signal
       confidence,
-      description: `Fakeout bajista: precio rompió BB inferior ${ind.bbLower.toFixed(5)} pero volvió dentro. Señal alcista.`,
+      description: `Fakeout bajista: precio rompio BB inferior ${ind.bbLower.toFixed(2)} pero volvio dentro. Senal alcista.`,
       keyLevels: {
         entry: curr.close,
         stopLoss: prev1.low,
@@ -305,50 +309,50 @@ function detectFakeout(candles: Candle[], ind: IndicatorSnapshot): DetectedPatte
 
 // === REVERSAL DETECTION ===
 // RSI divergence + key candle patterns at extremes
+// v2: Relaxed thresholds — RSI < 35 (was 30) and RSI > 65 (was 70)
 
-function detectReversal(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  if (last < 10 || ind.rsi14 === null) return null;
+function detectReversalAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  if (idx < 10 || ind.rsi14 === null) return null;
   
   // Bullish reversal: RSI oversold + bullish candle
-  if (ind.rsi14 < 30 && candles[last].close > candles[last].open) {
-    const rsiConf = ind.rsi14 < 20 ? 25 : 15;
+  if (ind.rsi14 < 35 && candles[idx].close > candles[idx].open) {
+    const rsiConf = ind.rsi14 < 20 ? 25 : ind.rsi14 < 25 ? 20 : 10;
     const trendConf = ind.trend === 'BEARISH' ? 10 : 0; // better after downtrend
-    const bbConf = (ind.bbPercentB !== null && ind.bbPercentB < 0) ? 10 : 0;
+    const bbConf = (ind.bbPercentB !== null && ind.bbPercentB < 0.05) ? 10 : 0;
     const confidence = Math.min(90, Math.max(35, 40 + rsiConf + trendConf + bbConf));
     
     return {
       type: 'reversal',
       direction: 'BULLISH',
       confidence,
-      description: `Reversión alcista: RSI ${ind.rsi14.toFixed(1)} en sobreventa + vela alcista${ind.trend === 'BEARISH' ? ' tras tendencia bajista' : ''}`,
+      description: `Reversion alcista: RSI ${ind.rsi14.toFixed(1)} en sobreventa + vela alcista${ind.trend === 'BEARISH' ? ' tras tendencia bajista' : ''}`,
       keyLevels: {
-        entry: candles[last].close,
-        stopLoss: candles[last].low,
-        takeProfit: candles[last].close + (candles[last].close - candles[last].low) * 2.5,
+        entry: candles[idx].close,
+        stopLoss: candles[idx].low,
+        takeProfit: candles[idx].close + (candles[idx].close - candles[idx].low) * 2.5,
       },
-      indicators: ['RSI', ...(ind.bbPercentB !== null && ind.bbPercentB < 0 ? ['Bollinger Bands'] : [])],
+      indicators: ['RSI', ...(ind.bbPercentB !== null && ind.bbPercentB < 0.05 ? ['Bollinger Bands'] : [])],
     };
   }
   
   // Bearish reversal: RSI overbought + bearish candle
-  if (ind.rsi14 > 70 && candles[last].close < candles[last].open) {
-    const rsiConf = ind.rsi14 > 80 ? 25 : 15;
+  if (ind.rsi14 > 65 && candles[idx].close < candles[idx].open) {
+    const rsiConf = ind.rsi14 > 80 ? 25 : ind.rsi14 > 75 ? 20 : 10;
     const trendConf = ind.trend === 'BULLISH' ? 10 : 0;
-    const bbConf = (ind.bbPercentB !== null && ind.bbPercentB > 1) ? 10 : 0;
+    const bbConf = (ind.bbPercentB !== null && ind.bbPercentB > 0.95) ? 10 : 0;
     const confidence = Math.min(90, Math.max(35, 40 + rsiConf + trendConf + bbConf));
     
     return {
       type: 'reversal',
       direction: 'BEARISH',
       confidence,
-      description: `Reversión bajista: RSI ${ind.rsi14.toFixed(1)} en sobrecompra + vela bajista${ind.trend === 'BULLISH' ? ' tras tendencia alcista' : ''}`,
+      description: `Reversion bajista: RSI ${ind.rsi14.toFixed(1)} en sobrecompra + vela bajista${ind.trend === 'BULLISH' ? ' tras tendencia alcista' : ''}`,
       keyLevels: {
-        entry: candles[last].close,
-        stopLoss: candles[last].high,
-        takeProfit: candles[last].close - (candles[last].high - candles[last].close) * 2.5,
+        entry: candles[idx].close,
+        stopLoss: candles[idx].high,
+        takeProfit: candles[idx].close - (candles[idx].high - candles[idx].close) * 2.5,
       },
-      indicators: ['RSI', ...(ind.bbPercentB !== null && ind.bbPercentB > 1 ? ['Bollinger Bands'] : [])],
+      indicators: ['RSI', ...(ind.bbPercentB !== null && ind.bbPercentB > 0.95 ? ['Bollinger Bands'] : [])],
     };
   }
   
@@ -357,25 +361,25 @@ function detectReversal(candles: Candle[], ind: IndicatorSnapshot): DetectedPatt
 
 // === TREND CONTINUATION DETECTION ===
 // Pullback in established trend then continuation
+// v2: Wider tolerance for SMA20 proximity (0.3% instead of 0.2%)
 
-function detectTrendContinuation(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
-  const last = candles.length - 1;
-  if (last < 5 || !ind.sma20 || !ind.ema12 || !ind.ema26) return null;
+function detectTrendContinuationAt(candles: Candle[], ind: IndicatorSnapshot, idx: number): DetectedPattern | null {
+  if (idx < 1 || !ind.sma20 || !ind.ema12 || !ind.ema26) return null;
   
-  const curr = candles[last];
-  const prev = candles[last - 1];
+  const curr = candles[idx];
+  const prev = candles[idx - 1];
   
   // Bullish continuation: pullback to SMA20 then bounce
-  if (ind.trend === 'BULLISH' && prev.low <= ind.sma20 * 1.001 && curr.close > curr.open && curr.close > prev.close) {
+  if (ind.trend === 'BULLISH' && prev.low <= ind.sma20 * 1.003 && curr.close > curr.open && curr.close > prev.close) {
     const adxConf = (ind.adx && ind.adx > 20) ? 15 : 0;
-    const smaTouch = Math.abs(prev.low - ind.sma20) / ind.sma20 < 0.002 ? 10 : 0;
+    const smaTouch = Math.abs(prev.low - ind.sma20) / ind.sma20 < 0.003 ? 10 : 0;
     const confidence = Math.min(90, Math.max(35, 50 + adxConf + smaTouch));
     
     return {
       type: 'trend_continuation',
       direction: 'BULLISH',
       confidence,
-      description: `Continuación alcista: pullback a SMA20 ${ind.sma20.toFixed(5)} y rebote. EMA12 > EMA26, tendencia BULLISH.`,
+      description: `Continuacion alcista: pullback a SMA20 ${ind.sma20.toFixed(2)} y rebote. EMA12 > EMA26, tendencia BULLISH.`,
       keyLevels: {
         entry: curr.close,
         stopLoss: ind.sma20 - (ind.atr14 || 0) * 1.5,
@@ -386,22 +390,145 @@ function detectTrendContinuation(candles: Candle[], ind: IndicatorSnapshot): Det
   }
   
   // Bearish continuation: pullback to SMA20 then rejection
-  if (ind.trend === 'BEARISH' && prev.high >= ind.sma20 * 0.999 && curr.close < curr.open && curr.close < prev.close) {
+  if (ind.trend === 'BEARISH' && prev.high >= ind.sma20 * 0.997 && curr.close < curr.open && curr.close < prev.close) {
     const adxConf = (ind.adx && ind.adx > 20) ? 15 : 0;
-    const smaTouch = Math.abs(prev.high - ind.sma20) / ind.sma20 < 0.002 ? 10 : 0;
+    const smaTouch = Math.abs(prev.high - ind.sma20) / ind.sma20 < 0.003 ? 10 : 0;
     const confidence = Math.min(90, Math.max(35, 50 + adxConf + smaTouch));
     
     return {
       type: 'trend_continuation',
       direction: 'BEARISH',
       confidence,
-      description: `Continuación bajista: pullback a SMA20 ${ind.sma20.toFixed(5)} y rechazo. EMA12 < EMA26, tendencia BEARISH.`,
+      description: `Continuacion bajista: pullback a SMA20 ${ind.sma20.toFixed(2)} y rechazo. EMA12 < EMA26, tendencia BEARISH.`,
       keyLevels: {
         entry: curr.close,
         stopLoss: ind.sma20 + (ind.atr14 || 0) * 1.5,
         takeProfit: curr.close - (ind.atr14 || curr.close * 0.005) * 3,
       },
       indicators: ['SMA20', 'EMA12/26', ...(ind.adx && ind.adx > 20 ? ['ADX'] : [])],
+    };
+  }
+  
+  return null;
+}
+
+// === MOMENTUM SHIFT DETECTION (NEW in v2) ===
+// Detects when multiple indicators align to signal a directional shift
+// This is the "catch-all" pattern that fires when indicators show clear direction
+// even if no classic candlestick pattern is present
+// Requirements: At least 3 of 5 indicator signals agree on direction
+
+function detectMomentumShift(candles: Candle[], ind: IndicatorSnapshot): DetectedPattern | null {
+  const last = candles.length - 1;
+  if (last < 5) return null;
+  
+  const currentPrice = candles[last].close;
+  let bullishSignals = 0;
+  let bearishSignals = 0;
+  const bullishIndicators: string[] = [];
+  const bearishIndicators: string[] = [];
+  
+  // Signal 1: EMA crossover direction
+  if (ind.ema12 !== null && ind.ema26 !== null) {
+    if (ind.ema12 > ind.ema26) {
+      bullishSignals += 1;
+      bullishIndicators.push('EMA12/26');
+    } else {
+      bearishSignals += 1;
+      bearishIndicators.push('EMA12/26');
+    }
+  }
+  
+  // Signal 2: MACD histogram
+  if (ind.macdHistogram !== null) {
+    if (ind.macdHistogram > 0) {
+      bullishSignals += 1;
+      bullishIndicators.push('MACD');
+    } else {
+      bearishSignals += 1;
+      bearishIndicators.push('MACD');
+    }
+  }
+  
+  // Signal 3: RSI zone
+  if (ind.rsi14 !== null) {
+    if (ind.rsi14 > 55) {
+      bullishSignals += 1;
+      bullishIndicators.push('RSI');
+    } else if (ind.rsi14 < 45) {
+      bearishSignals += 1;
+      bearishIndicators.push('RSI');
+    }
+    // RSI 45-55 = neutral, no signal
+  }
+  
+  // Signal 4: Price vs SMA20
+  if (ind.sma20 !== null) {
+    const priceVsSma = (currentPrice - ind.sma20) / ind.sma20;
+    if (priceVsSma > 0.002) {
+      bullishSignals += 1;
+      bullishIndicators.push('SMA20');
+    } else if (priceVsSma < -0.002) {
+      bearishSignals += 1;
+      bearishIndicators.push('SMA20');
+    }
+  }
+  
+  // Signal 5: Stochastic
+  if (ind.stochK !== null && ind.stochD !== null) {
+    if (ind.stochK > ind.stochD && ind.stochK > 50) {
+      bullishSignals += 1;
+      bullishIndicators.push('Stoch');
+    } else if (ind.stochK < ind.stochD && ind.stochK < 50) {
+      bearishSignals += 1;
+      bearishIndicators.push('Stoch');
+    }
+  }
+  
+  // Need at least 3 signals agreeing for a momentum shift
+  const MIN_SIGNALS = 3;
+  const atr = ind.atr14 || currentPrice * 0.005;
+  
+  if (bullishSignals >= MIN_SIGNALS) {
+    // Calculate confidence based on signal strength
+    const baseConf = 30 + (bullishSignals - MIN_SIGNALS) * 10; // 30 for 3, 40 for 4, 50 for 5
+    const adxBoost = (ind.adx && ind.adx > 25) ? 10 : 0;
+    const volBoost = ind.volumeAnalysis.relativeVolume > 1.3 ? 5 : 0;
+    const trendBoost = ind.trend === 'BULLISH' ? 10 : 0;
+    const confidence = Math.min(80, Math.max(30, baseConf + adxBoost + volBoost + trendBoost));
+    
+    return {
+      type: 'momentum_shift',
+      direction: 'BULLISH',
+      confidence,
+      description: `Momentum shift alcista: ${bullishSignals}/5 indicadores alineados (${bullishIndicators.join(', ')}). ADX ${ind.adx?.toFixed(0) || 'N/A'}.`,
+      keyLevels: {
+        entry: currentPrice,
+        stopLoss: currentPrice - atr * 1.5,
+        takeProfit: currentPrice + atr * 3,
+      },
+      indicators: bullishIndicators,
+    };
+  }
+  
+  if (bearishSignals >= MIN_SIGNALS) {
+    const baseConf = 30 + (bearishSignals - MIN_SIGNALS) * 10;
+    const adxBoost = (ind.adx && ind.adx > 25) ? 10 : 0;
+    const volBoost = ind.volumeAnalysis.relativeVolume > 1.3 ? 5 : 0;
+    const trendBoost = ind.trend === 'BEARISH' ? 10 : 0;
+    const confidence = Math.min(80, Math.max(30, baseConf + adxBoost + volBoost + trendBoost));
+    
+    return {
+      type: 'momentum_shift',
+      direction: 'BEARISH',
+      confidence,
+      description: `Momentum shift bajista: ${bearishSignals}/5 indicadores alineados (${bearishIndicators.join(', ')}). ADX ${ind.adx?.toFixed(0) || 'N/A'}.`,
+      keyLevels: {
+        entry: currentPrice,
+        stopLoss: currentPrice + atr * 1.5,
+        takeProfit: currentPrice - atr * 3,
+      },
+      indicators: bearishIndicators,
     };
   }
   
@@ -426,31 +553,36 @@ export const PATTERN_DESCRIPTIONS: Record<PatternType, { name: string; nameEs: s
   breakout: {
     name: 'Breakout',
     nameEs: 'Ruptura',
-    description: 'Precio rompe nivel clave (Bollinger Band) con volumen. Señal de inicio de movimiento direccional.',
+    description: 'Precio rompe nivel clave (Bollinger Band) con volumen. Senal de inicio de movimiento direccional.',
   },
   liquidity_sweep: {
     name: 'Liquidity Sweep',
     nameEs: 'Barrido de liquidez',
-    description: 'Precio barre un extremo reciente capturando stops, luego revierte. Señal de reversión institucional.',
+    description: 'Precio barre un extremo reciente capturando stops, luego revierte. Senal de reversion institucional.',
   },
   engulfing: {
     name: 'Engulfing',
     nameEs: 'Envolvente',
-    description: 'Vela actual envuelve completamente la anterior. Señal fuerte de cambio de momentum.',
+    description: 'Vela actual envuelve completamente la anterior. Senal fuerte de cambio de momentum.',
   },
   fakeout: {
     name: 'Fakeout',
     nameEs: 'Falsa ruptura',
-    description: 'Precio rompe nivel clave pero vuelve rápidamente dentro. Señal contraria al falso breakout.',
+    description: 'Precio rompe nivel clave pero vuelve rapidamente dentro. Senal contraria al falso breakout.',
   },
   reversal: {
     name: 'Reversal',
-    nameEs: 'Reversión',
-    description: 'RSI en sobrecompra/sobreventa + vela contraria. Señal de cambio de tendencia potencial.',
+    nameEs: 'Reversion',
+    description: 'RSI en sobrecompra/sobreventa + vela contraria. Senal de cambio de tendencia potencial.',
   },
   trend_continuation: {
     name: 'Trend Continuation',
-    nameEs: 'Continuación de tendencia',
-    description: 'Pullback a media móvil en tendencia establecida seguido de rebote. Señal de continuación.',
+    nameEs: 'Continuacion de tendencia',
+    description: 'Pullback a media movil en tendencia establecida seguido de rebote. Senal de continuacion.',
+  },
+  momentum_shift: {
+    name: 'Momentum Shift',
+    nameEs: 'Cambio de momentum',
+    description: '3+ indicadores alineados en la misma direccion (EMA, MACD, RSI, SMA20, Stoch). Senal de momentum direccional.',
   },
 };

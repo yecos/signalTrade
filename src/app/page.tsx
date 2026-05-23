@@ -856,6 +856,50 @@ export default function TradingDashboard() {
     return () => clearInterval(interval);
   }, []);
 
+  // Auto-run trader cycle every 5 minutes when auto-trader is active
+  // (Vercel Hobby doesn't support 5-min crons, so we use client-side polling)
+  useEffect(() => {
+    // Only run cycles if auto-trader is enabled
+    if (!autoTraderState?.isRunning) return;
+
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    let cycleInterval: NodeJS.Timeout | null = null;
+
+    const runAutoCycle = async () => {
+      try {
+        const res = await fetch("/api/auto-trader", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "run-cycle" }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.signalsGenerated > 0) {
+            addLiveFeed(`Auto-ciclo: ${data.signalsGenerated} señal(es) generada(s)`, "success");
+            fetchSignals();
+            fetchStats();
+          }
+          if (data.tradesExecuted > 0) {
+            addLiveFeed(`Auto-ejecución: ${data.tradesExecuted} trade(s) ejecutado(s)`, "success");
+          }
+          fetchAutoTrader();
+        }
+      } catch (err) { /* silent fail - will retry next cycle */ }
+    };
+
+    // Run first cycle after 30 seconds (give page time to load)
+    const initialTimeout = setTimeout(() => {
+      runAutoCycle();
+      // Then every 5 minutes
+      cycleInterval = setInterval(runAutoCycle, FIVE_MINUTES);
+    }, 30000);
+
+    return () => {
+      clearTimeout(initialTimeout);
+      if (cycleInterval) clearInterval(cycleInterval);
+    };
+  }, [autoTraderState?.isRunning]);
+
   // ─── Handlers ────────────────────────────────────────────────────────────
 
   const handleToggleAutoTrader = async (start: boolean) => {

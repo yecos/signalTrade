@@ -37,7 +37,7 @@ model Signal {
   historicalSampleSize   Int?
   screenshotUrl          String?
   // === NEW FIELDS FOR STATISTICAL ENGINE ===
-  patternType            String?  // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation
+  patternType            String?  // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation, momentum_shift
   sessionType            String?  // Asia, London, New York, Overlap
   setupScore             Float?   // 0-100: calculated from historical pattern+session performance
   indicatorsJson         String?  // JSON: all computed indicators at signal time
@@ -91,7 +91,7 @@ model MarketCandle {
 
 model SetupStats {
   id            String   @id @default(cuid())
-  patternType   String   // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation
+  patternType   String   // breakout, liquidity_sweep, engulfing, fakeout, reversal, trend_continuation, momentum_shift
   asset         String?  // null = all assets
   session       String?  // null = all sessions; Asia, London, New York, Overlap
   timeframe     String?  // null = all timeframes
