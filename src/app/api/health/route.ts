@@ -4,7 +4,16 @@ export async function GET() {
   const startTime = Date.now();
 
   try {
-    const { testConnection, getDbMode } = await import("@/lib/db");
+    const { testConnection, getDbMode, runAutoMigration } = await import("@/lib/db");
+    
+    // Run auto-migration first to ensure all columns exist
+    let migrationResult = null;
+    try {
+      migrationResult = await runAutoMigration();
+    } catch (migrateErr) {
+      console.error('[HEALTH] Migration error:', migrateErr);
+    }
+    
     const dbTest = await testConnection();
 
     const status = dbTest.ok ? "healthy" : "unhealthy";
@@ -20,6 +29,11 @@ export async function GET() {
           signalCount: dbTest.signalCount,
           error: dbTest.error,
         },
+        migration: migrationResult ? {
+          applied: migrationResult.applied,
+          skipped: migrationResult.skipped,
+          errors: migrationResult.errors,
+        } : undefined,
         timestamp: new Date().toISOString(),
         responseTime: `${Date.now() - startTime}ms`,
       },

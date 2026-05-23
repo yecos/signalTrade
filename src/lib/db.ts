@@ -98,6 +98,10 @@ const MTF_MIGRATIONS: Array<{ column: string; sql: string }> = [
   { column: 'h4Filter',      sql: 'ALTER TABLE Signal ADD COLUMN h4Filter TEXT' },
   { column: 'entryQuality',  sql: 'ALTER TABLE Signal ADD COLUMN entryQuality TEXT' },
   { column: 'mtfJson',       sql: 'ALTER TABLE Signal ADD COLUMN mtfJson TEXT' },
+  // Phase 7: Proven Edge fields
+  { column: 'provenEdgeTier',     sql: 'ALTER TABLE Signal ADD COLUMN provenEdgeTier TEXT' },
+  { column: 'provenEdgeAllowed',  sql: 'ALTER TABLE Signal ADD COLUMN provenEdgeAllowed BOOLEAN' },
+  { column: 'edgeClassification', sql: 'ALTER TABLE Signal ADD COLUMN edgeClassification TEXT' },
 ]
 
 export async function runAutoMigration(): Promise<{ applied: string[]; skipped: string[]; errors: string[] }> {
