@@ -452,9 +452,10 @@ function startStatusServer(): Promise<void> {
       if (url.pathname === '/optimal-config') {
         const optimalConfig = {
           enabled: true,
-          assets: ['EUR/USD', 'GBP/USD', 'USD/JPY', 'BTC/USD', 'ETH/USD'],
+          assets: ['BTC/USD', 'ETH/USD'], // Only assets with proven backtest edge
           timeframe: 'M5',
           intervalMinutes: 5,
+          expirationMinutes: 40, // Backtest-proven optimal (56.8% WR on liquidity_sweep)
           minSetupScore: 15,
           maxConcurrentSignals: 20,
           confidenceBoost: 0,
