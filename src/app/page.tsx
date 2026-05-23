@@ -250,6 +250,7 @@ interface EdgeProfileResponse {
   summary: { greenCount: number; yellowCount: number; redCount: number; greyCount: number; totalCombos: number };
   greenEdges: Array<{ patternType: string; session: string; asset: string; classification: string; bayesianWR: number; rawWR: number; sampleSize: number; wins: number; losses: number; pValue: number }>;
   redEdges: Array<{ patternType: string; session: string; asset: string; classification: string; bayesianWR: number; rawWR: number; sampleSize: number }>;
+  entries: Array<{ patternType: string; session: string; asset: string; classification: string; bayesianWR: number; rawWR: number; sampleSize: number; wins: number; losses: number; pValue: number; confidenceInterval: { lower: number; upper: number }; avgExpectancy: number; avgSetupScore: number }>;
 }
 
 // ─── Market Engine Types ────────────────────────────────────────────────────
@@ -995,16 +996,38 @@ export default function TradingDashboard() {
       }))
     : [];
 
-  const patternChartData = stats
+  const patternChartData = stats && Object.keys(stats.winRateByPattern).length > 0
     ? Object.entries(stats.winRateByPattern).map(([p, data]) => ({
         name: PATTERN_NAMES[p] || p, winRate: Math.round(data.rate), total: data.total,
       }))
+    : edgeProfile?.entries
+      ? Object.entries(
+          edgeProfile.entries.reduce((acc, e) => {
+            if (!acc[e.patternType]) acc[e.patternType] = { wr: 0, count: 0 };
+            acc[e.patternType].wr += e.rawWR;
+            acc[e.patternType].count++;
+            return acc;
+          }, {} as Record<string, { wr: number; count: number }>)
+        ).map(([p, data]) => ({
+          name: PATTERN_NAMES[p] || p, winRate: Math.round(data.wr / data.count), total: data.count,
+        }))
     : [];
 
-  const sessionChartData = stats
+  const sessionChartData = stats && Object.keys(stats.winRateBySession).length > 0
     ? Object.entries(stats.winRateBySession).map(([s, data]) => ({
         name: SESSION_NAMES[s] || s, winRate: Math.round(data.rate), total: data.total,
       }))
+    : edgeProfile?.entries
+      ? Object.entries(
+          edgeProfile.entries.reduce((acc, e) => {
+            if (!acc[e.session]) acc[e.session] = { wr: 0, count: 0 };
+            acc[e.session].wr += e.rawWR;
+            acc[e.session].count++;
+            return acc;
+          }, {} as Record<string, { wr: number; count: number }>)
+        ).map(([s, data]) => ({
+          name: SESSION_NAMES[s] || s, winRate: Math.round(data.wr / data.count), total: data.count,
+        }))
     : [];
 
   const weeklyData = stats?.weeklyPerformance.slice(-8) || [];
@@ -1223,8 +1246,8 @@ export default function TradingDashboard() {
                         const src = marketEngineStatus?.sources?.[asset] || "OFFLINE";
                         const price = marketEngineStatus?.lastPrice?.[asset];
                         const lat = marketEngineStatus?.latency?.[asset];
-                        const srcColor = src === "BINANCE" ? "#00ff88" : src === "TWELVEDATA" ? "#00aaff" : src === "FALLBACK" ? "#ff8800" : "#ff3366";
-                        const srcLabel = src === "BINANCE" ? "BIN" : src === "TWELVEDATA" ? "12D" : src === "FALLBACK" ? "SIM" : "OFF";
+                        const srcColor = src === "BINANCE" ? "#00ff88" : src === "TWELVEDATA" ? "#00aaff" : src === "COINGECKO" ? "#8b5cf6" : src === "FRANKFURTER" ? "#f59e0b" : src === "FALLBACK" ? "#ff8800" : "#ff3366";
+                        const srcLabel = src === "BINANCE" ? "BIN" : src === "TWELVEDATA" ? "12D" : src === "COINGECKO" ? "CGK" : src === "FRANKFURTER" ? "FRK" : src === "FALLBACK" ? "SIM" : "OFF";
                         return (
                           <div key={asset} className="p-2 rounded-lg bg-white/5 flex flex-col gap-0.5">
                             <div className="flex items-center justify-between">
@@ -1576,6 +1599,7 @@ export default function TradingDashboard() {
                           <TableHead className="text-white/50 text-[10px]">TF</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Dir.</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Entrada</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Expiry</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Resultado</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Patrón</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Sesión</TableHead>
@@ -1583,6 +1607,7 @@ export default function TradingDashboard() {
                           <TableHead className="text-white/50 text-[10px]">Setup</TableHead>
                           <TableHead className="text-white/50 text-[10px]">EV</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Calidad</TableHead>
+                          <TableHead className="text-white/50 text-[10px]">Edge</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Datos</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Fuente</TableHead>
                           <TableHead className="text-white/50 text-[10px]">Modo</TableHead>
@@ -1592,7 +1617,7 @@ export default function TradingDashboard() {
                       <TableBody>
                         {signals.length === 0 ? (
                           <TableRow>
-                            <TableCell colSpan={16} className="text-center text-white/30 py-8 text-sm">No hay señales registradas</TableCell>
+                            <TableCell colSpan={18} className="text-center text-white/30 py-8 text-sm">No hay señales registradas</TableCell>
                           </TableRow>
                         ) : (
                           signals
@@ -1612,6 +1637,7 @@ export default function TradingDashboard() {
                                 </div>
                               </TableCell>
                               <TableCell className="text-white/70 text-[10px] font-mono">{formatPrice(signal.entryPrice, signal.asset)}</TableCell>
+                              <TableCell className="text-white/50 text-[10px] font-mono">{signal.expirationMinutes ? `${signal.expirationMinutes}m` : "—"}</TableCell>
                               <TableCell>
                                 <Badge className={`${resultBg(signal.result)} text-[10px] px-1.5 py-0 border`}>
                                   {signal.result || signal.status}
@@ -1625,6 +1651,24 @@ export default function TradingDashboard() {
                                 {signal.expectancy !== null ? signal.expectancy.toFixed(2) : "—"}
                               </TableCell>
                               <TableCell><QualityMiniBar score={signal.qualityScore} /></TableCell>
+                              <TableCell>
+                                {(() => {
+                                  const edgeEntry = edgeProfile?.entries?.find(e => e.patternType === signal.patternType && e.session === signal.sessionType && e.asset === signal.asset);
+                                  if (edgeEntry) {
+                                    const cls = edgeEntry.classification;
+                                    return (
+                                      <Badge className={`text-[8px] px-1 py-0 border ${
+                                        cls === 'GREEN' ? 'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20' :
+                                        cls === 'YELLOW' ? 'bg-[#ffaa00]/10 text-[#ffaa00] border-[#ffaa00]/20' :
+                                        'bg-[#ff3366]/10 text-[#ff3366] border-[#ff3366]/20'
+                                      }`}>
+                                        {cls} {edgeEntry.rawWR.toFixed(0)}%
+                                      </Badge>
+                                    );
+                                  }
+                                  return <span className="text-white/30 text-[9px]">—</span>;
+                                })()}
+                              </TableCell>
                               <TableCell><DataSourceIndicators dataAvailability={signal.dataAvailability} /></TableCell>
                               <TableCell><SourceBadge source={signal.source} /></TableCell>
                               <TableCell><AnalysisModeBadge mode={signal.analysisMode} /></TableCell>
@@ -2300,6 +2344,18 @@ export default function TradingDashboard() {
                 {PATTERN_TYPES.map((pattern) => {
                   const patternStats = stats?.winRateByPattern?.[pattern];
                   const setupData = setupScores?.summary.byPattern?.[pattern];
+                  // Fallback: aggregate edge-profile data for this pattern
+                  const edgeEntries = edgeProfile?.entries?.filter(e => e.patternType === pattern) || [];
+                  const edgeAgg = edgeEntries.length > 0 ? {
+                    avgWR: edgeEntries.reduce((s, e) => s + e.rawWR, 0) / edgeEntries.length,
+                    totalSignals: edgeEntries.reduce((s, e) => s + e.sampleSize, 0),
+                    totalWins: edgeEntries.reduce((s, e) => s + e.wins, 0),
+                    totalLosses: edgeEntries.reduce((s, e) => s + e.losses, 0),
+                    bestClassification: edgeEntries.some(e => e.classification === 'GREEN') ? 'GREEN' : edgeEntries.some(e => e.classification === 'YELLOW') ? 'YELLOW' : 'RED',
+                  } : null;
+                  const displayWR = patternStats ? patternStats.rate : edgeAgg ? edgeAgg.avgWR : null;
+                  const displayTotal = patternStats ? patternStats.total : edgeAgg ? edgeAgg.totalSignals : 0;
+                  const displayEdge = setupData?.edge || (edgeAgg ? (edgeAgg.bestClassification === 'GREEN' ? 'POSITIVE' : edgeAgg.bestClassification === 'YELLOW' ? 'MARGINAL' : 'NEGATIVE') : null);
                   return (
                     <motion.div key={pattern} whileHover={{ scale: 1.02 }} transition={{ duration: 0.2 }}>
                       <Card className="bg-[#111827] border-white/10 hover:border-white/20 transition-colors">
@@ -2316,20 +2372,33 @@ export default function TradingDashboard() {
                           <div className="space-y-2">
                             <div className="flex justify-between text-[10px]">
                               <span className="text-white/40">Win Rate</span>
-                              <span className="font-mono" style={{ color: patternStats ? (patternStats.rate >= 60 ? NEON_GREEN : patternStats.rate >= 50 ? NEON_YELLOW : NEON_RED) : "#666" }}>
-                                {patternStats ? `${patternStats.rate.toFixed(1)}%` : "Sin datos"}
+                              <span className="font-mono" style={{ color: displayWR !== null ? (displayWR >= 60 ? NEON_GREEN : displayWR >= 50 ? NEON_YELLOW : NEON_RED) : "#666" }}>
+                                {displayWR !== null ? `${displayWR.toFixed(1)}%` : "Sin datos"}
+                                {edgeAgg && !patternStats && <span className="text-[8px] text-white/30 ml-1">(histórico)</span>}
                               </span>
                             </div>
                             <div className="flex justify-between text-[10px]">
                               <span className="text-white/40">Total Señales</span>
-                              <span className="text-white font-mono">{patternStats?.total || 0}</span>
+                              <span className="text-white font-mono">{displayTotal}</span>
                             </div>
                             <div className="flex justify-between text-[10px]">
                               <span className="text-white/40">Edge</span>
-                              <span style={{ color: edgeColor(setupData?.edge || "UNKNOWN") }}>
-                                {edgeLabel(setupData?.edge || "UNKNOWN")}
+                              <span style={{ color: edgeColor(displayEdge || "UNKNOWN") }}>
+                                {edgeLabel(displayEdge || "UNKNOWN")}
                               </span>
                             </div>
+                            {edgeAgg && (
+                              <div className="flex justify-between text-[10px]">
+                                <span className="text-white/40">Clasificación</span>
+                                <Badge className={`text-[8px] px-1 py-0 border ${
+                                  edgeAgg.bestClassification === 'GREEN' ? 'bg-[#00ff88]/10 text-[#00ff88] border-[#00ff88]/20' :
+                                  edgeAgg.bestClassification === 'YELLOW' ? 'bg-[#ffaa00]/10 text-[#ffaa00] border-[#ffaa00]/20' :
+                                  'bg-[#ff3366]/10 text-[#ff3366] border-[#ff3366]/20'
+                                }`}>
+                                  {edgeAgg.bestClassification}
+                                </Badge>
+                              </div>
+                            )}
                           </div>
                         </CardContent>
                       </Card>

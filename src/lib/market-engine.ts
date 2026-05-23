@@ -15,12 +15,12 @@ export interface MarketCandle {
   low: number;
   close: number;
   volume: number;
-  source: 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FALLBACK';
+  source: 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FRANKFURTER' | 'FALLBACK';
 }
 
 export interface MarketEngineStatus {
   connected: boolean;
-  sources: Record<string, 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FALLBACK' | 'OFFLINE'>;
+  sources: Record<string, 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FRANKFURTER' | 'FALLBACK' | 'OFFLINE'>;
   lastPrice: Record<string, number>;
   lastUpdate: Record<string, string>;
   latency: Record<string, number>;
@@ -364,7 +364,7 @@ function generateGBMCandles(asset: string, count: number, timeframe: string): Ma
 
 // ─── Helper: Update source status in cache ────────────────────────────────────
 
-function updateSourceStatus(asset: string, source: 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FALLBACK', price: number) {
+function updateSourceStatus(asset: string, source: 'COINGECKO' | 'BINANCE' | 'TWELVEDATA' | 'FRANKFURTER' | 'FALLBACK', price: number) {
   const state = getCachedState();
   state.status.sources[asset] = source;
   state.status.lastPrice[asset] = price;
@@ -377,8 +377,8 @@ function updateSourceStatus(asset: string, source: 'COINGECKO' | 'BINANCE' | 'TW
 
   // Recalculate data quality
   const sources = Object.values(state.status.sources);
-  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA')) {
-    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA') ? 'HIGH' : 'MEDIUM';
+  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER')) {
+    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER') ? 'HIGH' : 'MEDIUM';
   } else if (sources.some(s => s === 'FALLBACK')) {
     state.status.dataQuality = 'LOW';
   } else {
@@ -537,7 +537,7 @@ async function performHealthCheck(): Promise<void> {
       if (isCrypto && coinGecko.ok) {
         state.status.sources[asset] = 'COINGECKO';
       } else if (!isCrypto && frankfurter.ok) {
-        state.status.sources[asset] = 'COINGECKO'; // Using COINGECKO category for free sources
+        state.status.sources[asset] = 'FRANKFURTER'; // Frankfurter API for forex pairs
       } else if (binance.ok) {
         state.status.sources[asset] = 'BINANCE';
       } else if (twelveData.ok) {
@@ -550,8 +550,8 @@ async function performHealthCheck(): Promise<void> {
 
   // Recalculate data quality
   const sources = Object.values(state.status.sources);
-  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA')) {
-    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA') ? 'HIGH' : 'MEDIUM';
+  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER')) {
+    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER') ? 'HIGH' : 'MEDIUM';
   } else {
     state.status.dataQuality = 'LOW';
   }
@@ -611,7 +611,7 @@ export function getEngineStatusSync(): MarketEngineStatus {
 
 export function getAnalysisMode(asset: string): 'FULL' | 'PARTIAL' | 'FALLBACK' | 'DEMO' {
   const source = getCachedState().status.sources[asset];
-  if (source === 'COINGECKO' || source === 'BINANCE' || source === 'TWELVEDATA') return 'FULL';
+  if (source === 'COINGECKO' || source === 'BINANCE' || source === 'TWELVEDATA' || source === 'FRANKFURTER') return 'FULL';
   if (source === 'FALLBACK') return 'FALLBACK';
   return 'DEMO';
 }

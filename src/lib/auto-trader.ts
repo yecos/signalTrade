@@ -802,6 +802,10 @@ export async function generateAutoSignal(
         } : null])
       ),
     }) : null,
+    // === PROVEN EDGE (Phase 7) ===
+    provenEdgeTier: provenEdgeTier || null,
+    provenEdgeAllowed: provenEdgeAllowed ?? null,
+    edgeClassification: edgeClassification || null,
   };
   
   const signal = await db.signal.create({ data: signalData });

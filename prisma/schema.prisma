@@ -65,6 +65,10 @@ model Signal {
   h4Filter               String?  // PASS, FAIL, NO_DATA
   entryQuality           String?  // EXCELLENT, GOOD, FAIR, POOR, DANGEROUS
   mtfJson                String?  // JSON: full MTF analysis details
+  // === PROVEN EDGE (Phase 7) ===
+  provenEdgeTier         String?  // TIER_1, TIER_2, TIER_3, or null
+  provenEdgeAllowed      Boolean? // Whether this combo is in the proven edges allowlist
+  edgeClassification     String?  // GREEN, YELLOW, RED, GREY - from edge profile
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
