@@ -82,3 +82,25 @@ Stage Summary:
 - Next: User needs to run `npx tsx scripts/backtest.ts --save-db` to feed SetupStats
 - After that, Edge Profile will classify combos from real backtest data
 - The pipeline now has the most important filter: don't trade confirmed losers
+---
+Task ID: dashboard-review-fixes
+Agent: main
+Task: Review dashboard and fix all display issues
+
+Work Log:
+- Reviewed live dashboard using browser agent
+- Verified all API endpoints
+- Fixed COINGECKO source label missing in page.tsx
+- Fixed Frankfurter API mislabeled as COINGECKO
+- Added FRANKFURTER to type definitions and data quality
+- Fixed Patrones tab with edge-profile fallback
+- Added Expiry and Edge columns to Historial table
+- Added provenEdge fields to Prisma schema and auto-trader
+- Build passed, pushed to GitHub
+
+Stage Summary:
+- 6 bugs fixed, 4 enhancements added
+- Source labels now show correctly
+- Patrones tab shows historical data from edge-profile
+- Historial shows Expiry and Edge classification
+- Proven edge info persisted to database
