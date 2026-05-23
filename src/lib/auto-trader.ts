@@ -1,11 +1,11 @@
-// AUTO-TRADER ENGINE v4 — Edge Profile + Full Statistical Pipeline + Multi-Timeframe Confluence
-// Market Data → Indicators → Patterns → Session → Regime → MTF → Features → Quality → Edge Profile → Bayesian → Expectancy → Signal
+// AUTO-TRADER ENGINE v5 — Proven Edge Filter + Full Statistical Pipeline
+// Market Data → Indicators → Patterns → Session → PROVEN EDGE FILTER → Regime → MTF → Quality → Edge Profile → Bayesian → Signal
 // The goal is to ONLY TRADE what has a PROVEN EDGE. Everything else is NO OPERAR.
 // "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
-// v4: Added Edge Profile — GREEN/YELLOW/RED/GREY classification of all setup combos.
-//     RED combos → hard NO OPERAR (confirmed losers from backtest).
-//     GREEN combos → confidence boost + priority.
-//     YELLOW combos → cautious trading only with high confidence.
+// v5: Added Proven Edge Filter — Hard allowlist from 6-month backtest.
+//     BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
+//     Only TIER_1/2/3 combos pass the filter.
+//     v4 Edge Profile still used for Bayesian adjustments on allowed combos.
 
 import { db } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
@@ -21,6 +21,7 @@ import { calculateBayesianStats, quickBayesianWR } from './bayesian-engine';
 import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './expectancy-engine';
 import { quickMTFScore, type MTFConfluence } from './mtf-analysis';
 import { getEdgeDecision, type EdgeClassification, type EdgeDecision, invalidateEdgeProfileCache } from './edge-profile';
+import { checkProvenEdge, type EdgeTier, type ProvenEdge } from './proven-edges';
 
 // === TYPES ===
 
@@ -33,6 +34,7 @@ export interface AutoTraderConfig {
   maxConcurrentSignals: number; // max pending signals at once
   confidenceBoost: number;   // extra confidence from historical edge
   noOperarThreshold: number; // below this confidence → NO_OPERAR
+  strictMode: boolean;       // true = only proven edges, false = data collection mode
 }
 
 export interface AutoTraderState {
@@ -90,19 +92,24 @@ export interface SignalGenerationResult {
   // === Phase 6 Edge Profile fields ===
   edgeClassification: EdgeClassification;
   edgeReason: string;
+  // === Phase 7 Proven Edge fields ===
+  provenEdgeTier: EdgeTier;
+  provenEdgeAllowed: boolean;
+  provenEdge: ProvenEdge | null;
 }
 
 // === DEFAULT CONFIG ===
 
 export const DEFAULT_CONFIG: AutoTraderConfig = {
   enabled: false,
-  assets: ['EUR/USD', 'GBP/USD', 'BTC/USD'],
+  assets: ['BTC/USD', 'ETH/USD'],
   timeframe: 'M5',
   intervalMinutes: 5,
   minSetupScore: 30,
   maxConcurrentSignals: 10,
   confidenceBoost: 0,
   noOperarThreshold: 40,
+  strictMode: true, // Only trade proven edges — BLOCKED patterns never pass
 };
 
 // === SETUP SCORE CALCULATION ===
@@ -282,6 +289,11 @@ export async function generateAutoSignal(
   let edgeClassification: EdgeClassification = 'GREY';
   let edgeDecision: EdgeDecision | null = null;
   let edgeReason = '';
+
+  // === Phase 7: Proven Edge fields ===
+  let provenEdgeTier: EdgeTier = 'UNKNOWN';
+  let provenEdgeAllowed = false;
+  let provenEdge: ProvenEdge | null = null;
   
   // Step 1: Get market data - try REAL market engine first, then fall back to DB
   let candles: any[] = [];
@@ -336,6 +348,8 @@ export async function generateAutoSignal(
       h1Filter: 'NO_DATA', h4Filter: 'NO_DATA', entryQuality: 'FAIR',
       // Edge Profile fields
       edgeClassification: 'GREY', edgeReason: 'Datos insuficientes para clasificar edge',
+      // Proven Edge fields
+      provenEdgeTier: 'UNKNOWN', provenEdgeAllowed: false, provenEdge: null,
     };
   }
   
@@ -417,6 +431,32 @@ export async function generateAutoSignal(
     direction = indicatorDirection.direction;
     confidence = indicatorDirection.confidence;
     reason = indicatorDirection.reason;
+  }
+  
+  // ═══ Step 4.5: PROVEN EDGE FILTER (Phase 7) ═══
+  // THE MOST IMPORTANT FILTER IN THE PIPELINE.
+  // Hard allowlist from 6-month backtest: only trade combos with proven positive edge.
+  // BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
+  const provenEdgeResult = checkProvenEdge(
+    bestPattern?.type || null,
+    session.session,
+    asset,
+    true // strict mode — only proven combos pass
+  );
+  provenEdgeTier = provenEdgeResult.tier;
+  provenEdgeAllowed = provenEdgeResult.allowed;
+  provenEdge = provenEdgeResult.edge;
+
+  if (!provenEdgeAllowed) {
+    // HARD BLOCK: This combo doesn't have a proven edge.
+    // Even in data collection mode, we don't trade confirmed losers.
+    direction = 'NO_OPERAR';
+    reason = provenEdgeResult.reason;
+    confidence = 0;
+  } else {
+    // Apply confidence boost based on tier
+    confidence = Math.min(100, confidence + provenEdgeResult.confidenceBoost);
+    reason += ` [${provenEdgeResult.reason}]`;
   }
   
   // Step 5: Calculate setup score
@@ -802,6 +842,10 @@ export async function generateAutoSignal(
     // Edge Profile fields
     edgeClassification,
     edgeReason,
+    // Proven Edge fields
+    provenEdgeTier,
+    provenEdgeAllowed,
+    provenEdge,
   };
 }
 

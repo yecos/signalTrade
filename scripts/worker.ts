@@ -460,6 +460,7 @@ function startStatusServer(): Promise<void> {
           maxConcurrentSignals: 20,
           confidenceBoost: 0,
           noOperarThreshold: 20,
+          strictMode: true, // Only trade proven edges — BLOCKED patterns never pass
         };
         try {
           await db.appSettings.upsert({
