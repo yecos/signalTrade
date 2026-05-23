@@ -21,9 +21,12 @@ import { calculateBayesianStats, quickBayesianWR } from './bayesian-engine';
 import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './expectancy-engine';
 import { quickMTFScore, type MTFConfluence } from './mtf-analysis';
 import { getEdgeDecision, type EdgeClassification, type EdgeDecision, invalidateEdgeProfileCache } from './edge-profile';
-import { checkProvenEdge, type EdgeTier, type ProvenEdge } from './proven-edges';
+import { checkProvenEdge, type EdgeTier, type ProvenEdge, getBlockedPatterns } from './proven-edges';
 
 // === TYPES ===
+
+// Blocked patterns lookup (from proven-edges module)
+const BLOCKED_PATTERNS = getBlockedPatterns();
 
 export interface AutoTraderConfig {
   enabled: boolean;
@@ -437,22 +440,37 @@ export async function generateAutoSignal(
   // THE MOST IMPORTANT FILTER IN THE PIPELINE.
   // Hard allowlist from 6-month backtest: only trade combos with proven positive edge.
   // BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
+  // In data collection mode: allow unproven combos with positive pattern WR to build dataset.
   const provenEdgeResult = checkProvenEdge(
     bestPattern?.type || null,
     session.session,
     asset,
-    true // strict mode — only proven combos pass
+    strictMode && !isDataCollectionMode // strict only in production mode, not data collection
   );
   provenEdgeTier = provenEdgeResult.tier;
   provenEdgeAllowed = provenEdgeResult.allowed;
   provenEdge = provenEdgeResult.edge;
 
   if (!provenEdgeAllowed) {
-    // HARD BLOCK: This combo doesn't have a proven edge.
-    // Even in data collection mode, we don't trade confirmed losers.
-    direction = 'NO_OPERAR';
-    reason = provenEdgeResult.reason;
-    confidence = 0;
+    // HARD BLOCK for confirmed losers (breakout, trend_continuation, none)
+    if (provenEdgeResult.tier === 'BLOCKED') {
+      direction = 'NO_OPERAR';
+      reason = provenEdgeResult.reason;
+      confidence = 0;
+    } else {
+      // UNKNOWN combo — not in proven list but not a confirmed loser
+      // In data collection mode: allow but reduce confidence (we need data!)
+      // In production mode: block
+      if (isDataCollectionMode && bestPattern && direction !== 'NO_OPERAR') {
+        // Keep the direction but reduce confidence — we need this data
+        confidence = Math.max(0, confidence + provenEdgeResult.confidenceBoost);
+        reason += ` [MODO RECOLECCIÓN: Combo no probado pero generando señal para dataset]`;
+      } else {
+        direction = 'NO_OPERAR';
+        reason = provenEdgeResult.reason;
+        confidence = 0;
+      }
+    }
   } else {
     // Apply confidence boost based on tier
     confidence = Math.min(100, confidence + provenEdgeResult.confidenceBoost);
@@ -508,9 +526,16 @@ export async function generateAutoSignal(
   const isDataCollectionMode = sampleSize < 1000;
   
   if (!sessionCheck.shouldTrade && session.session === 'OffHours') {
-    direction = 'NO_OPERAR';
-    reason = sessionCheck.reason;
-    confidence = 0;
+    // OffHours: only skip if in production mode
+    if (!isDataCollectionMode) {
+      direction = 'NO_OPERAR';
+      reason = sessionCheck.reason;
+      confidence = 0;
+    } else {
+      // Data collection: still generate but flag it
+      confidence = Math.max(0, confidence - 15);
+      reason += ` [MODO RECOLECCIÓN: Fuera de horas óptimas, -15 confianza pero generando para dataset]`;
+    }
   } else if (!sessionCheck.shouldTrade && !isDataCollectionMode) {
     direction = 'NO_OPERAR';
     reason = sessionCheck.reason;
@@ -601,9 +626,18 @@ export async function generateAutoSignal(
     if (edgeClassification === 'RED') {
       // HARD BLOCK: This combo is a confirmed loser from backtest data.
       // Even in data collection mode, we don't want to trade confirmed losers.
-      direction = 'NO_OPERAR';
-      reason = edgeDecision.reason;
-      confidence = Math.max(0, Math.min(confidence + edgeDecision.confidenceAdjustment, 15));
+      // EXCEPT: if it's a non-blocked pattern (liquidity_sweep, fakeout, etc.)
+      // we still generate for dataset even with RED edge — we need the data.
+      const isBlockedPattern = BLOCKED_PATTERNS.hasOwnProperty(bestPattern?.type || 'none');
+      if (isBlockedPattern || !isDataCollectionMode) {
+        direction = 'NO_OPERAR';
+        reason = edgeDecision.reason;
+        confidence = Math.max(0, Math.min(confidence + edgeDecision.confidenceAdjustment, 15));
+      } else {
+        // Data collection: generate signal even with RED edge for non-blocked patterns
+        confidence = Math.max(0, confidence + edgeDecision.confidenceAdjustment);
+        reason += ` [MODO RECOLECCIÓN: Edge rojo pero patrón no bloqueado, generando para dataset]`;
+      }
     } else if (edgeClassification === 'GREEN') {
       // CONFIRMED EDGE: Boost confidence and setup score
       confidence = Math.min(100, confidence + edgeDecision.confidenceAdjustment);
@@ -642,14 +676,16 @@ export async function generateAutoSignal(
   
   // Step 8: Final NO_OPERAR check
   if (isDataCollectionMode) {
-    if (direction === 'NO_OPERAR' || (!bestPattern && confidence < 15)) {
+    if (direction === 'NO_OPERAR' || (!bestPattern && confidence < 10)) {
       const noOperarReasons: string[] = [];
       if (!bestPattern) noOperarReasons.push('Sin patrón detectado');
-      if (confidence < 15) noOperarReasons.push(`Sin dirección clara: ${confidence.toFixed(0)}%`);
+      if (confidence < 10) noOperarReasons.push(`Sin dirección clara: ${confidence.toFixed(0)}%`);
       direction = 'NO_OPERAR';
       reason = `NO OPERAR [MODO RECOLECCIÓN]: ${noOperarReasons.join('. ')}. Sin suficiente señal para determinar dirección.`;
     }
-    if (direction !== 'NO_OPERAR' && confidence < 40) {
+    // In data collection: allow signals with confidence >= 10 if they have a pattern
+    // We need WIN/LOSS data, so we generate signals even at lower confidence
+    if (direction !== 'NO_OPERAR' && confidence < 30) {
       reason += ` [MODO RECOLECCIÓN: Confianza baja (${confidence.toFixed(0)}%) pero generando señal para construir dataset]`;
     }
   } else {
