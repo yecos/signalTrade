@@ -1,0 +1,531 @@
+// BROKER CLIENT — Bybit API Integration
+// Handles order placement, position management, account queries
+// Supports both TESTNET (paper) and MAINNET (live) environments
+// Uses HMAC-SHA256 signed requests for authenticated endpoints
+
+import crypto from 'crypto';
+
+// === TYPES ===
+
+export interface BrokerConfig {
+  broker: 'BYBIT' | 'BINANCE' | 'PAPER';
+  apiKey: string;
+  apiSecret: string;
+  testnet: boolean; // true = demo/paper, false = real money
+}
+
+export interface OrderRequest {
+  symbol: string;       // e.g. "BTCUSDT"
+  side: 'Buy' | 'Sell';
+  orderType: 'Market' | 'Limit';
+  quantity: number;     // In base currency (BTC, ETH)
+  price?: number;       // Required for Limit orders
+  stopLoss?: number;
+  takeProfit?: number;
+  timeInForce?: 'GTC' | 'IOC' | 'FOK' | 'PostOnly';
+  reduceOnly?: boolean;
+  category?: 'linear' | 'inverse' | 'spot';
+}
+
+export interface OrderResult {
+  success: boolean;
+  orderId?: string;
+  execId?: string;
+  fillPrice?: number;
+  fillQuantity?: number;
+  commission?: number;
+  slippage?: number;
+  status: 'PENDING' | 'FILLED' | 'PARTIALLY_FILLED' | 'REJECTED' | 'ERROR';
+  rejectReason?: string;
+  raw?: any;
+}
+
+export interface PositionInfo {
+  symbol: string;
+  side: 'Buy' | 'Sell';
+  size: number;
+  entryPrice: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  unrealizedPnl: number;
+  leverage: number;
+  positionValue: number;
+}
+
+export interface AccountInfo {
+  balance: number;
+  equity: number;
+  unrealizedPnl: number;
+  availableBalance: number;
+  totalWalletBalance: number;
+}
+
+export interface TickerInfo {
+  symbol: string;
+  lastPrice: number;
+  bid: number;
+  ask: number;
+  spread: number;
+  volume24h: number;
+  fundingRate?: number;
+}
+
+// === SYMBOL MAPPING ===
+// Converts our internal asset names to broker symbol format
+
+export function assetToSymbol(asset: string): string {
+  const map: Record<string, string> = {
+    'BTC/USD': 'BTCUSDT',
+    'ETH/USD': 'ETHUSDT',
+    'BTC/USDT': 'BTCUSDT',
+    'ETH/USDT': 'ETHUSDT',
+    'EUR/USD': 'EURUSDT',  // Not available on Bybit, fallback to paper
+    'GBP/USD': 'GBPUSDT',  // Not available on Bybit, fallback to paper
+    'USD/JPY': 'USDJPY',   // Not available on Bybit, fallback to paper
+  };
+  return map[asset] || asset.replace('/', '');
+}
+
+export function isCryptoAsset(asset: string): boolean {
+  return asset.includes('BTC') || asset.includes('ETH');
+}
+
+// === BYBIT API CLIENT ===
+
+export class BybitClient {
+  private config: BrokerConfig;
+  private baseUrl: string;
+  private recvWindow = 5000;
+
+  constructor(config: BrokerConfig) {
+    this.config = config;
+    // Testnet = Bybit demo trading, Mainnet = real money
+    this.baseUrl = config.testnet
+      ? 'https://api-testnet.bybit.com'
+      : 'https://api.bybit.com';
+  }
+
+  // === AUTHENTICATION ===
+
+  private sign(params: Record<string, string | number>): {
+    apiKey: string; timestamp: string; sign: string; recvWindow: string;
+  } {
+    const timestamp = Date.now().toString();
+    const paramStr = timestamp + this.config.apiKey + this.recvWindow + Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
+    const sign = crypto.createHmac('sha256', this.config.apiSecret).update(paramStr).digest('hex');
+
+    return {
+      apiKey: this.config.apiKey,
+      timestamp,
+      sign,
+      recvWindow: this.recvWindow.toString(),
+    };
+  }
+
+  private async request(
+    method: 'GET' | 'POST',
+    path: string,
+    params: Record<string, string | number | boolean> = {},
+    signed = false
+  ): Promise<any> {
+    const url = new URL(`${this.baseUrl}${path}`);
+
+    // Filter out undefined/null values
+    const cleanParams: Record<string, string | number> = {};
+    for (const [k, v] of Object.entries(params)) {
+      if (v !== undefined && v !== null && v !== '') {
+        cleanParams[k] = v;
+      }
+    }
+
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+    };
+
+    if (signed) {
+      const auth = this.sign(cleanParams);
+      headers['X-BAPI-API-KEY'] = auth.apiKey;
+      headers['X-BAPI-TIMESTAMP'] = auth.timestamp;
+      headers['X-BAPI-SIGN'] = auth.sign;
+      headers['X-BAPI-RECV-WINDOW'] = auth.recvWindow;
+    }
+
+    try {
+      const response = await fetch(url.toString(), {
+        method,
+        headers,
+        body: method === 'POST' ? JSON.stringify(cleanParams) : undefined,
+      });
+
+      const data = await response.json();
+
+      if (data.retCode !== 0) {
+        console.error(`[BYBIT] API Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
+        return { success: false, retCode: data.retCode, retMsg: data.retMsg };
+      }
+
+      return { success: true, ...data };
+    } catch (err: any) {
+      console.error(`[BYBIT] Request failed: ${err.message}`);
+      return { success: false, retCode: -1, retMsg: err.message };
+    }
+  }
+
+  // === MARKET DATA ===
+
+  async getTicker(symbol: string): Promise<TickerInfo | null> {
+    const result = await this.request('GET', '/v5/market/tickers', {
+      category: 'linear',
+      symbol,
+    });
+
+    if (!result.success || !result.result?.list?.[0]) return null;
+
+    const t = result.result.list[0];
+    return {
+      symbol: t.symbol,
+      lastPrice: parseFloat(t.lastPrice),
+      bid: parseFloat(t.bid1Price),
+      ask: parseFloat(t.ask1Price),
+      spread: parseFloat(t.ask1Price) - parseFloat(t.bid1Price),
+      volume24h: parseFloat(t.volume24h),
+      fundingRate: parseFloat(t.fundingRate || '0'),
+    };
+  }
+
+  async getLastPrice(symbol: string): Promise<number | null> {
+    const ticker = await this.getTicker(symbol);
+    return ticker?.lastPrice || null;
+  }
+
+  // === ACCOUNT ===
+
+  async getAccountInfo(): Promise<AccountInfo | null> {
+    const result = await this.request('GET', '/v5/account/wallet-balance', {
+      accountType: 'UNIFIED',
+    }, true);
+
+    if (!result.success || !result.result?.list?.[0]) return null;
+
+    const account = result.result.list[0];
+    return {
+      balance: parseFloat(account.totalAvailableBalance || '0'),
+      equity: parseFloat(account.totalEquity || '0'),
+      unrealizedPnl: parseFloat(account.totalUnrealisedPnl || '0'),
+      availableBalance: parseFloat(account.totalAvailableBalance || '0'),
+      totalWalletBalance: parseFloat(account.totalWalletBalance || '0'),
+    };
+  }
+
+  // === TRADING ===
+
+  async placeOrder(order: OrderRequest): Promise<OrderResult> {
+    const params: Record<string, string | number | boolean> = {
+      category: order.category || 'linear',
+      symbol: order.symbol,
+      side: order.side,
+      orderType: order.orderType,
+      qty: order.quantity.toString(),
+    };
+
+    if (order.price && order.orderType === 'Limit') {
+      params.price = order.price.toString();
+    }
+
+    if (order.stopLoss) {
+      params.stopLoss = order.stopLoss.toString();
+    }
+
+    if (order.takeProfit) {
+      params.takeProfit = order.takeProfit.toString();
+    }
+
+    if (order.timeInForce) {
+      params.timeInForce = order.timeInForce;
+    }
+
+    if (order.reduceOnly) {
+      params.reduceOnly = true;
+    }
+
+    const result = await this.request('POST', '/v5/order/create', params, true);
+
+    if (!result.success) {
+      return {
+        success: false,
+        status: 'REJECTED',
+        rejectReason: result.retMsg || 'Unknown error',
+        raw: result,
+      };
+    }
+
+    return {
+      success: true,
+      orderId: result.result?.orderId,
+      status: 'PENDING',
+      raw: result,
+    };
+  }
+
+  async cancelOrder(symbol: string, orderId: string): Promise<boolean> {
+    const result = await this.request('POST', '/v5/order/cancel', {
+      category: 'linear',
+      symbol,
+      orderId,
+    }, true);
+
+    return result.success;
+  }
+
+  async getOrderHistory(symbol: string, limit = 10): Promise<any[]> {
+    const result = await this.request('GET', '/v5/order/history', {
+      category: 'linear',
+      symbol,
+      limit,
+    }, true);
+
+    return result.success ? (result.result?.list || []) : [];
+  }
+
+  // === POSITIONS ===
+
+  async getPositions(symbol?: string): Promise<PositionInfo[]> {
+    const params: Record<string, string | number> = {
+      category: 'linear',
+    };
+    if (symbol) params.symbol = symbol;
+
+    const result = await this.request('GET', '/v5/position/list', params, true);
+
+    if (!result.success) return [];
+
+    return (result.result?.list || [])
+      .filter((p: any) => parseFloat(p.size) > 0)
+      .map((p: any) => ({
+        symbol: p.symbol,
+        side: p.side,
+        size: parseFloat(p.size),
+        entryPrice: parseFloat(p.avgPrice),
+        stopLoss: p.stopLoss ? parseFloat(p.stopLoss) : undefined,
+        takeProfit: p.takeProfit ? parseFloat(p.takeProfit) : undefined,
+        unrealizedPnl: parseFloat(p.unrealisedPnl),
+        leverage: parseFloat(p.leverage),
+        positionValue: parseFloat(p.positionValue),
+      }));
+  }
+
+  async closePosition(symbol: string, side: 'Buy' | 'Sell', quantity: number): Promise<OrderResult> {
+    return this.placeOrder({
+      symbol,
+      side: side === 'Buy' ? 'Sell' : 'Buy',
+      orderType: 'Market',
+      quantity,
+      category: 'linear',
+      reduceOnly: true,
+    });
+  }
+
+  async setStopLoss(symbol: string, stopLoss: number, takeProfit?: number): Promise<boolean> {
+    const params: Record<string, string | number> = {
+      category: 'linear',
+      symbol,
+      stopLoss: stopLoss.toString(),
+      slTriggerBy: 'LastPrice',
+    };
+
+    if (takeProfit) {
+      params.takeProfit = takeProfit.toString();
+      params.tpTriggerBy = 'LastPrice';
+    }
+
+    const result = await this.request('POST', '/v5/position/trading-stop', params, true);
+    return result.success;
+  }
+
+  // === LEVERAGE ===
+
+  async setLeverage(symbol: string, leverage: number): Promise<boolean> {
+    const result = await this.request('POST', '/v5/position/set-leverage', {
+      category: 'linear',
+      symbol,
+      buyLeverage: leverage.toString(),
+      sellLeverage: leverage.toString(),
+    }, true);
+
+    return result.success;
+  }
+
+  // === HEALTH CHECK ===
+
+  async checkConnection(): Promise<{ ok: boolean; latency: number; serverTime?: number }> {
+    const start = Date.now();
+    try {
+      const result = await this.request('GET', '/v5/market/time');
+      return {
+        ok: result.success,
+        latency: Date.now() - start,
+        serverTime: result.result?.timeSecond,
+      };
+    } catch {
+      return { ok: false, latency: Date.now() - start };
+    }
+  }
+}
+
+// === PAPER TRADING CLIENT ===
+// Simulates broker operations without real API calls
+// Uses market-engine prices for realistic fills with simulated slippage
+
+export class PaperTradingClient {
+  private balance: number;
+  private equity: number;
+  private positions: Map<string, PositionInfo> = new Map();
+
+  constructor(initialBalance = 10000) {
+    this.balance = initialBalance;
+    this.equity = initialBalance;
+  }
+
+  async getAccountInfo(): Promise<AccountInfo> {
+    return {
+      balance: this.balance,
+      equity: this.equity,
+      unrealizedPnl: this.equity - this.balance,
+      availableBalance: this.balance,
+      totalWalletBalance: this.equity,
+    };
+  }
+
+  async placeOrder(order: OrderRequest, currentPrice?: number): Promise<OrderResult> {
+    const fillPrice = currentPrice || order.price || 0;
+    if (fillPrice === 0) {
+      return {
+        success: false,
+        status: 'REJECTED',
+        rejectReason: 'No price available for fill',
+      };
+    }
+
+    // Simulate slippage: 0.01-0.05% random
+    const slippagePct = (Math.random() * 0.04 + 0.01) / 100;
+    const slipMultiplier = order.side === 'Buy' ? 1 + slippagePct : 1 - slippagePct;
+    const actualFillPrice = fillPrice * slipMultiplier;
+    const commission = order.quantity * actualFillPrice * 0.0006; // 0.06% taker fee
+
+    this.balance -= commission;
+
+    // Track position
+    this.positions.set(order.symbol, {
+      symbol: order.symbol,
+      side: order.side,
+      size: order.quantity,
+      entryPrice: actualFillPrice,
+      stopLoss: order.stopLoss,
+      takeProfit: order.takeProfit,
+      unrealizedPnl: 0,
+      leverage: 1,
+      positionValue: order.quantity * actualFillPrice,
+    });
+
+    return {
+      success: true,
+      orderId: `PAPER-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      fillPrice: actualFillPrice,
+      fillQuantity: order.quantity,
+      commission,
+      slippage: Math.abs(actualFillPrice - fillPrice),
+      status: 'FILLED',
+    };
+  }
+
+  async closePosition(symbol: string, currentPrice: number): Promise<OrderResult> {
+    const pos = this.positions.get(symbol);
+    if (!pos) {
+      return { success: false, status: 'REJECTED', rejectReason: 'No position found' };
+    }
+
+    const slippagePct = (Math.random() * 0.04 + 0.01) / 100;
+    const closeSide = pos.side === 'Buy' ? 'Sell' : 'Buy';
+    const slipMultiplier = closeSide === 'Buy' ? 1 + slippagePct : 1 - slippagePct;
+    const actualFillPrice = currentPrice * slipMultiplier;
+    const commission = pos.size * actualFillPrice * 0.0006;
+
+    const rawPnl = closeSide === 'Sell'
+      ? (actualFillPrice - pos.entryPrice) * pos.size
+      : (pos.entryPrice - actualFillPrice) * pos.size;
+    const realizedPnl = rawPnl - commission;
+
+    this.balance += realizedPnl;
+    this.equity = this.balance;
+    this.positions.delete(symbol);
+
+    return {
+      success: true,
+      orderId: `PAPER-CLOSE-${Date.now()}`,
+      fillPrice: actualFillPrice,
+      fillQuantity: pos.size,
+      commission,
+      slippage: Math.abs(actualFillPrice - currentPrice),
+      status: 'FILLED',
+    };
+  }
+
+  async getPositions(): Promise<PositionInfo[]> {
+    return Array.from(this.positions.values());
+  }
+
+  async updateMarkPrice(symbol: string, price: number): Promise<void> {
+    const pos = this.positions.get(symbol);
+    if (!pos) return;
+
+    pos.unrealizedPnl = pos.side === 'Buy'
+      ? (price - pos.entryPrice) * pos.size
+      : (pos.entryPrice - price) * pos.size;
+
+    this.equity = this.balance + Array.from(this.positions.values())
+      .reduce((sum, p) => sum + p.unrealizedPnl, 0);
+  }
+
+  async checkConnection(): Promise<{ ok: boolean; latency: number }> {
+    return { ok: true, latency: 1 }; // Paper trading always "connected"
+  }
+}
+
+// === BROKER FACTORY ===
+
+export function createBrokerClient(config?: BrokerConfig): BybitClient | PaperTradingClient {
+  // If no config or no API keys, use paper trading
+  if (!config || !config.apiKey || !config.apiSecret) {
+    console.log('[BROKER] No API keys provided — using Paper Trading client');
+    return new PaperTradingClient();
+  }
+
+  // If PAPER broker type, use paper trading
+  if (config.broker === 'PAPER') {
+    console.log('[BROKER] Paper Trading mode selected');
+    return new PaperTradingClient();
+  }
+
+  // Create Bybit client (testnet or mainnet)
+  console.log(`[BROKER] ${config.testnet ? 'TESTNET' : 'MAINNET'} Bybit client created`);
+  return new BybitClient(config);
+}
+
+// Export singleton getter that reads from env
+let _brokerClient: BybitClient | PaperTradingClient | null = null;
+
+export function getBrokerClient(): BybitClient | PaperTradingClient {
+  if (!_brokerClient) {
+    _brokerClient = createBrokerClient({
+      broker: (process.env.BROKER_TYPE as any) || 'PAPER',
+      apiKey: process.env.BYBIT_API_KEY || '',
+      apiSecret: process.env.BYBIT_API_SECRET || '',
+      testnet: process.env.BYBIT_TESTNET !== 'false', // Default to testnet for safety
+    });
+  }
+  return _brokerClient;
+}
+
+export function resetBrokerClient(): void {
+  _brokerClient = null;
+}

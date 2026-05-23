@@ -34,7 +34,7 @@ import {
   Sun, Moon, Globe, Flame, Crosshair, ChevronLeft, ChevronRight,
   Database, Sparkles, Wifi, WifiOff, Gauge, Timer, AlertOctagon,
   ArrowUpRight, ArrowDownRight, CircleDot, Layers, Key, Server,
-  Signal,
+  Signal, DollarSign,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -696,6 +696,10 @@ export default function TradingDashboard() {
   const [provenEdges, setProvenEdges] = useState<ProvenEdgesResponse | null>(null);
   const [edgeProfile, setEdgeProfile] = useState<EdgeProfileResponse | null>(null);
 
+  // Trading execution state
+  const [tradingData, setTradingData] = useState<any>(null);
+  const [tradingLoading, setTradingLoading] = useState(false);
+
   // ─── Fetch functions ─────────────────────────────────────────────────────
 
   const fetchStats = useCallback(async () => {
@@ -792,6 +796,15 @@ export default function TradingDashboard() {
     } catch (err) { console.error("Error fetching edge profile:", err); }
   }, []);
 
+  const fetchTrading = useCallback(async () => {
+    setTradingLoading(true);
+    try {
+      const res = await fetch("/api/trading");
+      if (res.ok) setTradingData(await res.json());
+    } catch (err) { console.error("Error fetching trading data:", err); }
+    finally { setTradingLoading(false); }
+  }, []);
+
   // ─── Effects ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -812,7 +825,8 @@ export default function TradingDashboard() {
     if (activeTab === "auto-trader") fetchAutoTrader();
     if (activeTab === "learning" && !learningReport) fetchLearningReport();
     if (activeTab === "edges") { fetchProvenEdges(); fetchEdgeProfile(); }
-  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader, fetchLearningReport, learningReport, fetchProvenEdges, fetchEdgeProfile]);
+    if (activeTab === "trading") fetchTrading();
+  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader, fetchLearningReport, learningReport, fetchProvenEdges, fetchEdgeProfile, fetchTrading]);
 
   // Auto-refresh every 10 seconds
   useEffect(() => {
@@ -1132,6 +1146,9 @@ export default function TradingDashboard() {
               </TabsTrigger>
               <TabsTrigger value="auto-trader" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
                 <Bot className="size-3.5 mr-1" /> Auto-Trader
+              </TabsTrigger>
+              <TabsTrigger value="trading" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Zap className="size-3.5 mr-1" /> Trading
               </TabsTrigger>
               <TabsTrigger value="backtesting" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
                 <Brain className="size-3.5 mr-1" /> Backtesting
@@ -2659,6 +2676,287 @@ export default function TradingDashboard() {
                   </CardContent>
                 </Card>
               </div>
+            </motion.div>
+          </TabsContent>
+
+          {/* ─── TAB: TRADING (Phase 8) ────────────────────────────────────── */}
+          <TabsContent value="trading">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* Account Status */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                <StatCard title="Balance" value={tradingData ? `$${tradingData.account?.balance?.toFixed(2) || '0.00'}` : '—'} icon={<DollarSign className="size-4" />} color="#00ff88" />
+                <StatCard title="Equity" value={tradingData ? `$${tradingData.account?.equity?.toFixed(2) || '0.00'}` : '—'} icon={<TrendingUp className="size-4" />} color="#00aaff" />
+                <StatCard title="P&L Hoy" value={tradingData ? `$${(tradingData.riskState?.dailyPnl || 0).toFixed(2)}` : '—'} icon={<Activity className="size-4" />} color={(tradingData?.riskState?.dailyPnl || 0) >= 0 ? '#00ff88' : '#ff3366'} />
+                <StatCard title="Pos. Abiertas" value={tradingData?.engine?.openPositions ?? '—'} icon={<Target className="size-4" />} color="#ffaa00" />
+              </div>
+
+              {/* Account Mode & Circuit Breaker */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm text-white/70 flex items-center gap-2">
+                    <Shield className="size-4" /> Estado de Cuenta y Seguridad
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-white/50">Modo:</span>
+                      <Badge className={tradingData?.engine?.mode === 'PAPER' ? 'bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30' : 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30'}>
+                        {tradingData?.engine?.mode === 'PAPER' ? 'PAPER (Simulación)' : 'LIVE (Real)'}
+                      </Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-white/50">Broker:</span>
+                      <Badge className="bg-[#aa66ff]/15 text-[#aa66ff] border-[#aa66ff]/30">{tradingData?.account?.broker || 'PAPER'}</Badge>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-white/50">Conexión:</span>
+                      <Badge className={tradingData?.engine?.connected ? 'bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30' : 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30'}>
+                        {tradingData?.engine?.connected ? 'Conectado' : 'Desconectado'}
+                      </Badge>
+                    </div>
+                  </div>
+
+                  {/* Circuit Breaker Alert */}
+                  {tradingData?.account?.isCircuitBreaker && (
+                    <div className="bg-[#ff3366]/10 border border-[#ff3366]/30 rounded-lg p-3">
+                      <div className="flex items-center gap-2 mb-1">
+                        <AlertOctagon className="size-4 text-[#ff3366]" />
+                        <span className="text-sm font-bold text-[#ff3366]">CIRCUIT BREAKER ACTIVO</span>
+                      </div>
+                      <p className="text-xs text-[#ff3366]/80">{tradingData?.account?.circuitBreakerReason}</p>
+                      <Button size="sm" className="mt-2 bg-[#ff3366]/20 text-[#ff3366] border border-[#ff3366]/30 hover:bg-[#ff3366]/30" onClick={async () => {
+                        await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'deactivate-circuit-breaker' }) });
+                        fetchTrading();
+                      }}>
+                        Desactivar Circuit Breaker
+                      </Button>
+                    </div>
+                  )}
+
+                  {/* Risk Metrics */}
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+                    <div className="bg-white/5 rounded p-2">
+                      <span className="text-white/40">Riesgo/Trade</span>
+                      <div className="text-white font-mono">{tradingData?.account?.riskPerTrade || 1}%</div>
+                    </div>
+                    <div className="bg-white/5 rounded p-2">
+                      <span className="text-white/40">Pérdida Máx/Día</span>
+                      <div className="text-white font-mono">{tradingData?.account?.maxDailyLoss || 3}%</div>
+                    </div>
+                    <div className="bg-white/5 rounded p-2">
+                      <span className="text-white/40">Pos. Máx Simult.</span>
+                      <div className="text-white font-mono">{tradingData?.account?.maxOpenPositions || 3}</div>
+                    </div>
+                    <div className="bg-white/5 rounded p-2">
+                      <span className="text-white/40">Drawdown Máx</span>
+                      <div className="text-white font-mono">{tradingData?.account?.maxDrawdownPct || 10}%</div>
+                    </div>
+                  </div>
+
+                  {/* Drawdown Progress */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-white/40">Drawdown Actual</span>
+                      <span className="font-mono" style={{ color: (tradingData?.riskState?.currentDrawdownPct || 0) > 5 ? '#ff3366' : '#ffaa00' }}>
+                        {tradingData?.riskState?.currentDrawdownPct?.toFixed(1) || 0}%
+                      </span>
+                    </div>
+                    <Progress value={Math.min(100, (tradingData?.riskState?.currentDrawdownPct || 0) / (tradingData?.account?.maxDrawdownPct || 10) * 100)} className="h-2" />
+                  </div>
+                </CardContent>
+              </Card>
+
+              {/* Open Positions */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <div className="flex items-center justify-between">
+                    <CardTitle className="text-sm text-white/70 flex items-center gap-2">
+                      <Target className="size-4" /> Posiciones Abiertas ({tradingData?.openPositions?.length || 0})
+                    </CardTitle>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" className="text-xs border-white/20 text-white/50 hover:text-white hover:border-white/40" onClick={async () => {
+                        await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'check-sltp' }) });
+                        fetchTrading();
+                      }}>
+                        <RefreshCw className="size-3 mr-1" /> Check SL/TP
+                      </Button>
+                      {tradingData?.openPositions?.length > 0 && (
+                        <Button size="sm" variant="outline" className="text-xs border-[#ff3366]/30 text-[#ff3366] hover:bg-[#ff3366]/10" onClick={async () => {
+                          await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'close-all' }) });
+                          fetchTrading();
+                        }}>
+                          <Square className="size-3 mr-1" /> Cerrar Todas
+                        </Button>
+                      )}
+                    </div>
+                  </div>
+                </CardHeader>
+                <CardContent>
+                  {(!tradingData?.openPositions || tradingData.openPositions.length === 0) ? (
+                    <div className="text-center py-6 text-white/30 text-sm">Sin posiciones abiertas</div>
+                  ) : (
+                    <Table>
+                      <TableHeader>
+                        <TableRow className="border-white/10 hover:bg-transparent">
+                          <TableHead className="text-white/40 text-xs">Activo</TableHead>
+                          <TableHead className="text-white/40 text-xs">Dir.</TableHead>
+                          <TableHead className="text-white/40 text-xs">Entrada</TableHead>
+                          <TableHead className="text-white/40 text-xs">Actual</TableHead>
+                          <TableHead className="text-white/40 text-xs">P&L</TableHead>
+                          <TableHead className="text-white/40 text-xs">SL</TableHead>
+                          <TableHead className="text-white/40 text-xs">TP</TableHead>
+                          <TableHead className="text-white/40 text-xs">Modo</TableHead>
+                          <TableHead className="text-white/40 text-xs"></TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {tradingData.openPositions.map((p: any) => (
+                          <TableRow key={p.id} className="border-white/5 hover:bg-white/5">
+                            <TableCell className="font-mono text-xs">{p.asset}</TableCell>
+                            <TableCell>
+                              <Badge className={p.direction === 'BUY' ? 'bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30 text-[10px]' : 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30 text-[10px]'}>
+                                {p.direction === 'BUY' ? '↑ LONG' : '↓ SHORT'}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-mono text-xs">{formatPrice(p.entryPrice, p.asset)}</TableCell>
+                            <TableCell className="font-mono text-xs">{p.currentPrice ? formatPrice(p.currentPrice, p.asset) : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs" style={{ color: (p.unrealizedPnl || 0) >= 0 ? '#00ff88' : '#ff3366' }}>
+                              ${(p.unrealizedPnl || 0).toFixed(2)}
+                              {p.unrealizedPnlPct !== null && <span className="text-white/30 ml-1">({(p.unrealizedPnlPct || 0).toFixed(2)}%)</span>}
+                            </TableCell>
+                            <TableCell className="font-mono text-xs text-[#ff3366]">{p.stopLoss ? formatPrice(p.stopLoss, p.asset) : '—'}</TableCell>
+                            <TableCell className="font-mono text-xs text-[#00ff88]">{p.takeProfit ? formatPrice(p.takeProfit, p.asset) : '—'}</TableCell>
+                            <TableCell><Badge className="bg-[#aa66ff]/15 text-[#aa66ff] border-[#aa66ff]/30 text-[10px]">{p.executionMode}</Badge></TableCell>
+                            <TableCell>
+                              <Button size="sm" variant="outline" className="text-[10px] border-[#ff3366]/30 text-[#ff3366] hover:bg-[#ff3366]/10 h-6" onClick={async () => {
+                                await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'close-position', positionId: p.id }) });
+                                fetchTrading();
+                              }}>
+                                Cerrar
+                              </Button>
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Recent Trades */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm text-white/70 flex items-center gap-2">
+                    <Activity className="size-4" /> Trades Recientes ({tradingData?.stats?.totalTrades || 0} total)
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {(!tradingData?.recentTrades || tradingData.recentTrades.length === 0) ? (
+                    <div className="text-center py-6 text-white/30 text-sm">Sin trades ejecutados aún</div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="border-white/10 hover:bg-transparent">
+                            <TableHead className="text-white/40 text-xs">Activo</TableHead>
+                            <TableHead className="text-white/40 text-xs">Dir.</TableHead>
+                            <TableHead className="text-white/40 text-xs">Señal</TableHead>
+                            <TableHead className="text-white/40 text-xs">Entrada</TableHead>
+                            <TableHead className="text-white/40 text-xs">Salida</TableHead>
+                            <TableHead className="text-white/40 text-xs">P&L</TableHead>
+                            <TableHead className="text-white/40 text-xs">Slippage</TableHead>
+                            <TableHead className="text-white/40 text-xs">Estado</TableHead>
+                            <TableHead className="text-white/40 text-xs">Modo</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {tradingData.recentTrades.slice(0, 15).map((t: any) => (
+                            <TableRow key={t.id} className="border-white/5 hover:bg-white/5">
+                              <TableCell className="font-mono text-xs">{t.asset}</TableCell>
+                              <TableCell>
+                                <Badge className={t.direction === 'BUY' ? 'bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30 text-[10px]' : 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30 text-[10px]'}>
+                                  {t.direction === 'BUY' ? '↑' : '↓'}
+                                </Badge>
+                              </TableCell>
+                              <TableCell className="font-mono text-[10px] text-white/30">{t.signalPrice?.toFixed(2)}</TableCell>
+                              <TableCell className="font-mono text-xs">{t.entryPrice?.toFixed(2) || '—'}</TableCell>
+                              <TableCell className="font-mono text-xs">{t.exitPrice?.toFixed(2) || '—'}</TableCell>
+                              <TableCell className="font-mono text-xs" style={{ color: (t.realizedPnl || 0) > 0 ? '#00ff88' : (t.realizedPnl || 0) < 0 ? '#ff3366' : '#ffaa00' }}>
+                                {t.realizedPnl !== null ? `$${t.realizedPnl.toFixed(2)}` : '—'}
+                              </TableCell>
+                              <TableCell className="font-mono text-[10px] text-white/30">{t.slippage?.toFixed(4) || '—'}</TableCell>
+                              <TableCell>
+                                <Badge className={`${t.status === 'OPEN' ? 'bg-[#00aaff]/15 text-[#00aaff] border-[#00aaff]/30' : t.status === 'CLOSED' ? 'bg-white/10 text-white/50 border-white/20' : t.status === 'REJECTED' ? 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30' : 'bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30'} text-[10px]`}>
+                                  {t.status}
+                                </Badge>
+                              </TableCell>
+                              <TableCell><Badge className="bg-[#aa66ff]/15 text-[#aa66ff] border-[#aa66ff]/30 text-[10px]">{t.executionMode}</Badge></TableCell>
+                            </TableRow>
+                          ))}
+                        </TableBody>
+                      </Table>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Trading Stats */}
+              {tradingData?.stats && tradingData.stats.totalTrades > 0 && (
+                <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+                  <StatCard title="Win Rate" value={`${tradingData.stats.winRate}%`} icon={<CheckCircle className="size-4" />} color={tradingData.stats.winRate > 55 ? '#00ff88' : '#ff3366'} />
+                  <StatCard title="Wins/Losses" value={`${tradingData.stats.wins}/${tradingData.stats.losses}`} icon={<BarChart3 className="size-4" />} color="#00aaff" />
+                  <StatCard title="P&L Total" value={`$${tradingData.stats.totalPnl}`} icon={<DollarSign className="size-4" />} color={tradingData.stats.totalPnl >= 0 ? '#00ff88' : '#ff3366'} />
+                  <StatCard title="Profit Factor" value={tradingData.stats.profitFactor.toFixed(2)} icon={<TrendingUp className="size-4" />} color={tradingData.stats.profitFactor > 1 ? '#00ff88' : '#ff3366'} />
+                  <StatCard title="Comisiones" value={`$${tradingData.stats.totalCommission}`} icon={<MinusCircle className="size-4" />} color="#ffaa00" />
+                </div>
+              )}
+
+              {/* Auto-Execution Controls */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm text-white/70 flex items-center gap-2">
+                    <Zap className="size-4" /> Auto-Ejecución
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  <p className="text-xs text-white/40">
+                    Cuando la auto-ejecución está activada, las señales que pasan todos los filtros (Proven Edge, Quality, Regime, MTF) se ejecutan automáticamente como trades reales o simulados.
+                  </p>
+                  <div className="flex items-center gap-3">
+                    <Button size="sm" className="bg-[#00ff88]/20 text-[#00ff88] border border-[#00ff88]/30 hover:bg-[#00ff88]/30" onClick={async () => {
+                      await db.appSettings.upsert ? null : null; // handled via API
+                      await fetch('/api/auto-trader', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'update-config', config: { ...autoTraderConfig, strictMode: true } }),
+                      });
+                      // Enable auto-execution in PAPER mode
+                      await fetch('/api/trading', {
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ action: 'update-risk-config', config: {} }),
+                      });
+                      addLiveFeed('Auto-ejecución PAPER activada', 'success');
+                      fetchTrading();
+                    }}>
+                      <Play className="size-3 mr-1" /> Activar PAPER
+                    </Button>
+                    <Button size="sm" variant="outline" className="border-[#ffaa00]/30 text-[#ffaa00] hover:bg-[#ffaa00]/10" onClick={async () => {
+                      setTradingLoading(true);
+                      await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'check-expired' }) });
+                      await fetch('/api/trading', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'check-sltp' }) });
+                      fetchTrading();
+                      addLiveFeed('SL/TP y expiraciones verificadas', 'success');
+                    }}>
+                      <RefreshCw className="size-3 mr-1" /> Verificar SL/TP
+                    </Button>
+                  </div>
+                  <div className="bg-[#ff3366]/5 border border-[#ff3366]/20 rounded-lg p-3 text-xs text-[#ff3366]/80">
+                    <strong>⚠️ Advertencia:</strong> El modo LIVE opera con dinero real. Solo activa LIVE después de verificar el sistema en PAPER durante al menos 2 semanas con resultados positivos.
+                  </div>
+                </CardContent>
+              </Card>
+
             </motion.div>
           </TabsContent>
 

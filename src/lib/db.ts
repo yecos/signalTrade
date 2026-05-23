@@ -151,5 +151,117 @@ export async function runAutoMigration(): Promise<{ applied: string[]; skipped: 
     console.error(`[DB-MIGRATE] ❌ ${errors.length} errors: ${errors.join('; ')}`)
   }
 
+  // ═══ Phase 8: Execution Engine Tables ═══
+  await runTableMigrations()
+
   return { applied, skipped, errors }
+}
+
+// ─── TABLE-LEVEL MIGRATIONS (Phase 8: Execution Engine) ──────────────────────
+// Creates Trade, Position, Account tables if they don't exist.
+// These are whole tables (not just columns), so we use CREATE TABLE IF NOT EXISTS.
+
+const TABLE_CREATION_SQL = [
+  // Trade table
+  `CREATE TABLE IF NOT EXISTS Trade (
+    id TEXT PRIMARY KEY,
+    signalId TEXT,
+    asset TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    orderType TEXT NOT NULL DEFAULT 'MARKET',
+    orderSide TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    leverage REAL NOT NULL DEFAULT 1,
+    signalPrice REAL NOT NULL,
+    entryPrice REAL,
+    exitPrice REAL,
+    stopLoss REAL,
+    takeProfit REAL,
+    brokerOrderId TEXT,
+    brokerExecId TEXT,
+    slippage REAL,
+    commission REAL NOT NULL DEFAULT 0,
+    fillTime DATETIME,
+    realizedPnl REAL,
+    realizedPnlPct REAL,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    rejectReason TEXT,
+    riskPercent REAL,
+    positionValueUsd REAL,
+    executionMode TEXT NOT NULL DEFAULT 'PAPER',
+    journalNotes TEXT,
+    metadataJson TEXT,
+    createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closedAt DATETIME
+  )`,
+  // Position table
+  `CREATE TABLE IF NOT EXISTS Position (
+    id TEXT PRIMARY KEY,
+    tradeId TEXT,
+    asset TEXT NOT NULL,
+    direction TEXT NOT NULL,
+    quantity REAL NOT NULL,
+    leverage REAL NOT NULL DEFAULT 1,
+    entryPrice REAL NOT NULL,
+    stopLoss REAL,
+    takeProfit REAL,
+    currentPrice REAL,
+    unrealizedPnl REAL,
+    unrealizedPnlPct REAL,
+    brokerPositionId TEXT,
+    status TEXT NOT NULL DEFAULT 'OPEN',
+    maxFavorable REAL,
+    maxAdverse REAL,
+    executionMode TEXT NOT NULL DEFAULT 'PAPER',
+    metadataJson TEXT,
+    openedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    closedAt DATETIME
+  )`,
+  // Account table
+  `CREATE TABLE IF NOT EXISTS Account (
+    id TEXT PRIMARY KEY,
+    broker TEXT NOT NULL DEFAULT 'BYBIT',
+    accountId TEXT,
+    balance REAL NOT NULL DEFAULT 0,
+    equity REAL NOT NULL DEFAULT 0,
+    unrealizedPnl REAL NOT NULL DEFAULT 0,
+    dailyPnl REAL NOT NULL DEFAULT 0,
+    dailyTrades INTEGER NOT NULL DEFAULT 0,
+    maxDrawdown REAL NOT NULL DEFAULT 0,
+    peakEquity REAL NOT NULL DEFAULT 0,
+    isLive BOOLEAN NOT NULL DEFAULT 0,
+    riskPerTrade REAL NOT NULL DEFAULT 1,
+    maxDailyLoss REAL NOT NULL DEFAULT 3,
+    maxOpenPositions INTEGER NOT NULL DEFAULT 3,
+    maxDrawdownPct REAL NOT NULL DEFAULT 10,
+    apiKey TEXT,
+    apiSecret TEXT,
+    isActive BOOLEAN NOT NULL DEFAULT 1,
+    isCircuitBreaker BOOLEAN NOT NULL DEFAULT 0,
+    circuitBreakerReason TEXT,
+    lastSyncAt DATETIME,
+    createdAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updatedAt DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`,
+]
+
+async function runTableMigrations(): Promise<void> {
+  for (const sql of TABLE_CREATION_SQL) {
+    try {
+      await db.$executeRawUnsafe(sql)
+      const tableName = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/)?.[1] || 'unknown'
+      console.log(`[DB-MIGRATE] ✅ Table ensured: ${tableName}`)
+    } catch (err: any) {
+      const msg = err?.message || String(err)
+      if (msg.includes('already exists')) {
+        // Table already exists — fine
+        const tableName = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/)?.[1] || 'unknown'
+        console.log(`[DB-MIGRATE] ⏭️ Table already exists: ${tableName}`)
+      } else {
+        console.error(`[DB-MIGRATE] ❌ Error creating table: ${msg}`)
+      }
+    }
+  }
 }

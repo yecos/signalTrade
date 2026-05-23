@@ -140,3 +140,106 @@ model AppSettings {
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 }
+
+// === EXECUTION ENGINE MODELS (Phase 8) ===
+
+model Trade {
+  id                String   @id @default(cuid())
+  signalId          String?  // Link to the originating signal (null for manual trades)
+  asset             String   // BTC/USD, ETH/USD
+  direction         String   // BUY, SELL
+  // === Order Details ===
+  orderType         String   @default("MARKET") // MARKET, LIMIT
+  orderSide         String   // Buy, Sell (broker side)
+  quantity          Float    // Position size in base currency
+  leverage          Float    @default(1) // Leverage multiplier
+  // === Prices ===
+  signalPrice       Float    // Price at signal generation time
+  entryPrice        Float?   // Actual fill price
+  exitPrice         Float?   // Actual exit fill price
+  stopLoss          Float?   // Stop loss price
+  takeProfit        Float?   // Take profit price
+  // === Execution Metadata ===
+  brokerOrderId     String?  // Broker's order ID
+  brokerExecId      String?  // Broker's execution ID
+  slippage          Float?   // Difference between signal and fill price
+  commission        Float    @default(0) // Trading fee paid
+  fillTime          DateTime? // When order was filled
+  // === P&L ===
+  realizedPnl       Float?   // Profit/Loss in quote currency
+  realizedPnlPct    Float?   // Profit/Loss as percentage
+  // === Status ===
+  status            String   @default("PENDING") // PENDING, OPEN, CLOSING, CLOSED, CANCELLED, REJECTED, ERROR
+  rejectReason      String?  // Why the order was rejected
+  // === Risk Management ===
+  riskPercent       Float?   // % of account risked
+  positionValueUsd  Float?   // Total position value in USD
+  // === Audit ===
+  executionMode     String   @default("PAPER") // PAPER, LIVE
+  journalNotes      String?  // Manual notes
+  metadataJson      String?  // JSON: additional execution metadata
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  closedAt          DateTime?
+}
+
+model Position {
+  id                String   @id @default(cuid())
+  tradeId           String?  // Link to the opening trade
+  asset             String   // BTC/USD, ETH/USD
+  direction         String   // BUY, SELL
+  quantity          Float    // Position size
+  leverage          Float    @default(1)
+  entryPrice        Float    // Average entry price
+  stopLoss          Float?   // Current stop loss
+  takeProfit        Float?   // Current take profit
+  // === Mark-to-Market ===
+  currentPrice      Float?   // Latest mark price
+  unrealizedPnl     Float?   // Unrealized P&L
+  unrealizedPnlPct  Float?   // Unrealized P&L %
+  // === Broker ===
+  brokerPositionId  String?  // Broker's position ID
+  // === Status ===
+  status            String   @default("OPEN") // OPEN, CLOSING, CLOSED, LIQUIDATED
+  // === Risk Tracking ===
+  maxFavorable      Float?   // Maximum favorable excursion
+  maxAdverse        Float?   // Maximum adverse excursion
+  // === Audit ===
+  executionMode     String   @default("PAPER") // PAPER, LIVE
+  metadataJson      String?  // JSON: additional position metadata
+  openedAt          DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  closedAt          DateTime?
+}
+
+model Account {
+  id                String   @id @default(cuid())
+  broker            String   @default("BYBIT") // BYBIT, BINANCE, PAPER
+  accountId         String?  // Broker account ID
+  // === Balance ===
+  balance           Float    @default(0) // Available balance
+  equity            Float    @default(0) // Balance + unrealized P&L
+  unrealizedPnl     Float    @default(0) // Total unrealized P&L
+  // === Risk Metrics ===
+  dailyPnl          Float    @default(0) // Today's realized + unrealized P&L
+  dailyTrades       Int      @default(0) // Today's trade count
+  maxDrawdown       Float    @default(0) // Maximum drawdown from peak equity
+  peakEquity        Float    @default(0) // Highest equity reached
+  // === Configuration ===
+  isLive            Boolean  @default(false) // true = real money, false = paper
+  riskPerTrade      Float    @default(1) // % of account to risk per trade
+  maxDailyLoss      Float    @default(3) // Max daily loss as % of balance
+  maxOpenPositions  Int      @default(3) // Max concurrent open positions
+  maxDrawdownPct    Float    @default(10) // Max drawdown % before auto-stop
+  // === API Keys (encrypted in production) ===
+  apiKey            String?  // Broker API key
+  apiSecret         String?  // Broker API secret (should be env var in prod)
+  // === Status ===
+  isActive          Boolean  @default(true) // Account is active for trading
+  isCircuitBreaker  Boolean  @default(false) // Circuit breaker triggered
+  circuitBreakerReason String? // Why circuit breaker triggered
+  lastSyncAt        DateTime? // Last balance sync with broker
+  // === Audit ===
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+}

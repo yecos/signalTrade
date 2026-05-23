@@ -1130,11 +1130,15 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
   signalsSkipped: number;
   errors: string[];
   results: SignalGenerationResult[];
+  tradesExecuted: number;
+  tradesRejected: number;
 }> {
   const cfg = { ...DEFAULT_CONFIG, ...config };
   const results: SignalGenerationResult[] = [];
   let signalsGenerated = 0;
   let signalsSkipped = 0;
+  let tradesExecuted = 0;
+  let tradesRejected = 0;
   const errors: string[] = [];
   
   // Check max concurrent signals
@@ -1148,9 +1152,17 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
       signalsSkipped: cfg.assets.length,
       errors: [`Máximo de señales pendientes alcanzado: ${pendingCount}/${cfg.maxConcurrentSignals}`],
       results: [],
+      tradesExecuted: 0,
+      tradesRejected: 0,
     };
   }
   
+  // === Phase 8: Check if auto-execution is enabled ===
+  const executionSetting = await db.appSettings.findUnique({
+    where: { key: 'autoExecution' },
+  });
+  const autoExecution = executionSetting ? JSON.parse(executionSetting.value) : { enabled: false, mode: 'PAPER' };
+
   // Process each asset
   for (const asset of cfg.assets) {
     try {
@@ -1161,6 +1173,48 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
         signalsSkipped++;
       } else {
         signalsGenerated++;
+      }
+
+      // ═══ Phase 8: AUTO-EXECUTE TRADE if signal passed all filters ═══
+      // Only execute if: auto-execution is enabled AND signal is tradeable (not NO_OPERAR)
+      if (autoExecution.enabled && result.signalId && result.direction !== 'NO_OPERAR' && !result.skipped) {
+        try {
+          const { getExecutionEngine } = await import('./execution-engine');
+          const engine = getExecutionEngine(autoExecution.mode);
+
+          // Get ATR from indicators
+          const atr = result.indicators?.atr14 || (result.indicators?.close || result.indicators?.sma20 || 0) * 0.005;
+
+          const execResult = await engine.executeSignal({
+            signalId: result.signalId,
+            asset: result.asset,
+            direction: result.direction as 'HIGHER' | 'LOWER',
+            entryPrice: result.indicators?.close || 0, // Will be overridden by live price
+            confidence: result.confidence,
+            patternType: result.pattern,
+            sessionType: result.session,
+            edgeClassification: result.edgeClassification,
+            provenEdgeTier: result.provenEdgeTier,
+            winRate: result.adjustedWR,
+            riskRewardRatio: result.riskReward,
+            expectancy: result.expectancy,
+            setupScore: result.setupScore,
+            qualityScore: result.qualityScore,
+            atr: atr || result.indicators?.atr14 || 0,
+          });
+
+          if (execResult.success) {
+            tradesExecuted++;
+            console.log(`[AUTO-EXEC] ✅ Trade executed: ${result.asset} ${result.direction} | Mode: ${autoExecution.mode}`);
+          } else {
+            tradesRejected++;
+            console.log(`[AUTO-EXEC] ❌ Trade rejected: ${execResult.reason} | Mode: ${autoExecution.mode}`);
+          }
+        } catch (execErr: any) {
+          tradesRejected++;
+          errors.push(`Execution error ${asset}: ${execErr.message}`);
+          console.error(`[AUTO-EXEC] Error executing trade:`, execErr.message);
+        }
       }
       
       // Update last check time
@@ -1174,7 +1228,7 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
     }
   }
   
-  return { signalsGenerated, signalsSkipped, errors, results };
+  return { signalsGenerated, signalsSkipped, errors, results, tradesExecuted, tradesRejected };
 }
 
 // === GET SETUP SCORES (for dashboard) ===
