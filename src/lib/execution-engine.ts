@@ -11,7 +11,7 @@
 // 6. Trade result is recorded with P&L, slippage, journal
 
 import { db } from './db';
-import { getBrokerClientFromDB, assetToSymbol, isCryptoAsset, type BybitClient, type PaperTradingClient, type OrderResult } from './broker-client';
+import { getBrokerClientFromDB, assetToSymbol, isCryptoAsset, BybitClient, PaperTradingClient, type OrderResult } from './broker-client';
 import { assessRisk, getOrCreateAccount, updateAccountBalance } from './risk-manager';
 
 // === TYPES ===

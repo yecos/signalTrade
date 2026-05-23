@@ -441,11 +441,15 @@ export async function generateAutoSignal(
   // Hard allowlist from 6-month backtest: only trade combos with proven positive edge.
   // BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
   // In data collection mode: allow unproven combos with positive pattern WR to build dataset.
+  // Determine sample size for strict mode decision
+  const currentSampleSize = await db.signal.count({ where: { asset, status: { not: 'PENDING' } } });
+  const currentIsDataCollectionMode = currentSampleSize < 1000;
+  const currentStrictMode = !currentIsDataCollectionMode; // strict only when we have enough data
   const provenEdgeResult = checkProvenEdge(
     bestPattern?.type || null,
     session.session,
     asset,
-    strictMode && !isDataCollectionMode // strict only in production mode, not data collection
+    currentStrictMode // strict mode when we have enough data, lenient during data collection
   );
   provenEdgeTier = provenEdgeResult.tier;
   provenEdgeAllowed = provenEdgeResult.allowed;
@@ -461,7 +465,7 @@ export async function generateAutoSignal(
       // UNKNOWN combo — not in proven list but not a confirmed loser
       // In data collection mode: allow but reduce confidence (we need data!)
       // In production mode: block
-      if (isDataCollectionMode && bestPattern && direction !== 'NO_OPERAR') {
+      if (currentIsDataCollectionMode && bestPattern && direction !== 'NO_OPERAR') {
         // Keep the direction but reduce confidence — we need this data
         confidence = Math.max(0, confidence + provenEdgeResult.confidenceBoost);
         reason += ` [MODO RECOLECCIÓN: Combo no probado pero generando señal para dataset]`;
@@ -523,7 +527,7 @@ export async function generateAutoSignal(
   
   // Step 6: Session check
   const sessionCheck = shouldTradeSession(session, historicalWinRate, sampleSize);
-  const isDataCollectionMode = sampleSize < 1000;
+  const isDataCollectionMode = currentIsDataCollectionMode; // Reuse the value computed earlier
   
   if (!sessionCheck.shouldTrade && session.session === 'OffHours') {
     // OffHours: only skip if in production mode

@@ -107,11 +107,22 @@ export class BybitClient {
 
   // === AUTHENTICATION ===
 
-  private sign(params: Record<string, string | number>): {
+  private sign(params: Record<string, string | number>, method: 'GET' | 'POST' = 'GET'): {
     apiKey: string; timestamp: string; sign: string; recvWindow: string;
   } {
     const timestamp = Date.now().toString();
-    const paramStr = timestamp + this.config.apiKey + this.recvWindow + Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
+    let paramStr: string;
+
+    if (method === 'GET') {
+      // GET: timestamp + apiKey + recvWindow + queryString
+      const queryString = Object.keys(params).sort().map(k => `${k}=${params[k]}`).join('&');
+      paramStr = timestamp + this.config.apiKey + this.recvWindow + queryString;
+    } else {
+      // POST: timestamp + apiKey + recvWindow + JSON body string
+      const bodyStr = JSON.stringify(params);
+      paramStr = timestamp + this.config.apiKey + this.recvWindow + bodyStr;
+    }
+
     const sign = crypto.createHmac('sha256', this.config.apiSecret).update(paramStr).digest('hex');
 
     return {
@@ -128,8 +139,6 @@ export class BybitClient {
     params: Record<string, string | number | boolean> = {},
     signed = false
   ): Promise<any> {
-    const url = new URL(`${this.baseUrl}${path}`);
-
     // Filter out undefined/null values
     const cleanParams: Record<string, string | number> = {};
     for (const [k, v] of Object.entries(params)) {
@@ -138,12 +147,18 @@ export class BybitClient {
       }
     }
 
+    // Build query string for GET requests
+    const queryString = Object.entries(cleanParams)
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([k, v]) => `${k}=${v}`)
+      .join('&');
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
     };
 
     if (signed) {
-      const auth = this.sign(cleanParams);
+      const auth = this.sign(cleanParams, method);
       headers['X-BAPI-API-KEY'] = auth.apiKey;
       headers['X-BAPI-TIMESTAMP'] = auth.timestamp;
       headers['X-BAPI-SIGN'] = auth.sign;
@@ -151,13 +166,37 @@ export class BybitClient {
     }
 
     try {
-      const response = await fetch(url.toString(), {
+      let url: string;
+      let body: string | undefined;
+
+      if (method === 'GET') {
+        // GET: params go in the query string
+        url = queryString
+          ? `${this.baseUrl}${path}?${queryString}`
+          : `${this.baseUrl}${path}`;
+      } else {
+        // POST: params go in the body, sign uses JSON string
+        url = `${this.baseUrl}${path}`;
+        body = JSON.stringify(cleanParams);
+      }
+
+      const response = await fetch(url, {
         method,
         headers,
-        body: method === 'POST' ? JSON.stringify(cleanParams) : undefined,
+        body,
       });
 
-      const data = await response.json();
+      const text = await response.text();
+      if (!text) {
+        return { success: false, retCode: -1, retMsg: 'Empty response from server' };
+      }
+
+      let data: any;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        return { success: false, retCode: -1, retMsg: `Invalid JSON response: ${text.substring(0, 100)}` };
+      }
 
       if (data.retCode !== 0) {
         console.error(`[BYBIT] API Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
@@ -173,24 +212,29 @@ export class BybitClient {
 
   // === MARKET DATA ===
 
-  async getTicker(symbol: string): Promise<TickerInfo | null> {
-    const result = await this.request('GET', '/v5/market/tickers', {
-      category: 'linear',
-      symbol,
-    });
+  async getTicker(symbol: string, category: string = 'linear'): Promise<TickerInfo | null> {
+    // Try linear first (perpetual futures), then spot as fallback
+    for (const cat of [category, 'linear', 'spot']) {
+      const result = await this.request('GET', '/v5/market/tickers', {
+        category: cat,
+        symbol,
+      });
 
-    if (!result.success || !result.result?.list?.[0]) return null;
+      if (result.success && result.result?.list?.[0]) {
+        const t = result.result.list[0];
+        return {
+          symbol: t.symbol,
+          lastPrice: parseFloat(t.lastPrice),
+          bid: parseFloat(t.bid1Price),
+          ask: parseFloat(t.ask1Price),
+          spread: parseFloat(t.ask1Price) - parseFloat(t.bid1Price),
+          volume24h: parseFloat(t.volume24h),
+          fundingRate: parseFloat(t.fundingRate || '0'),
+        };
+      }
+    }
 
-    const t = result.result.list[0];
-    return {
-      symbol: t.symbol,
-      lastPrice: parseFloat(t.lastPrice),
-      bid: parseFloat(t.bid1Price),
-      ask: parseFloat(t.ask1Price),
-      spread: parseFloat(t.ask1Price) - parseFloat(t.bid1Price),
-      volume24h: parseFloat(t.volume24h),
-      fundingRate: parseFloat(t.fundingRate || '0'),
-    };
+    return null;
   }
 
   async getLastPrice(symbol: string): Promise<number | null> {

@@ -149,3 +149,27 @@ Stage Summary:
 - Paper trading gets real prices from Binance public API
 - Full API for configuring keys, testing connection, and enabling auto-execution
 - Build successful with no new errors
+
+---
+Task ID: 2
+Agent: Main Agent
+Task: Configure Bybit API keys and test full trading integration
+
+Work Log:
+- User provided Bybit API keys — verified they are MAINNET keys (not testnet)
+- Configured keys in DB Account table with isLive=true
+- Fixed BybitClient request() method: GET params now go in URL query string, POST params in body
+- Fixed BybitClient sign() method: GET uses queryString, POST uses JSON body for signature
+- Fixed BybitClient getTicker(): tries linear, then spot categories automatically
+- Fixed PaperTradingClient: added getLastPrice() and getTicker() methods using Binance public API
+- Fixed ExecutionEngine: changed type-only imports to value imports (BybitClient, PaperTradingClient) for instanceof checks
+- Fixed auto-trader strictMode bug: defined currentStrictMode/currentIsDataCollectionMode before use
+- Added test-connection, enable-auto-execution, disable-auto-execution, auto-execution-status API actions
+- Tested full flow: Bybit MAINNET connection ✅, BTC/USDT $75,485 ✅, ETH/USDT $2,065 ✅
+
+Stage Summary:
+- Bybit MAINNET API keys configured and verified working
+- Auto-execution enabled in PAPER mode (safe)
+- Balance shows $0 (need to deposit USDT to trade live)
+- Full auto-trader cycle generates signals correctly (NO_OPERAR during off-hours = correct behavior)
+- All API endpoints functional
