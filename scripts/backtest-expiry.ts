@@ -490,7 +490,7 @@ async function saveExpiryToDB(
   }
 
   let saved = 0;
-  comboMap.forEach((group) => {
+  for (const [, group] of comboMap) {
     const patternType = group[0].patternType || 'none';
     const session = group[0].sessionType;
     const asset = group[0].asset;
@@ -525,7 +525,7 @@ async function saveExpiryToDB(
       });
       saved++;
     } catch { /* skip */ }
-  });
+  }
   log(`  ✅ ${saved} combinaciones guardadas (expiración ${expiryCandles * 5} min)`);
 }
 
