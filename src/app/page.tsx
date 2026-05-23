@@ -228,6 +228,30 @@ interface SetupScoresResponse {
   };
 }
 
+interface ProvenEdge {
+  pattern: string;
+  session: string;
+  asset: string;
+  tier: 'TIER_1' | 'TIER_2' | 'TIER_3' | 'BLOCKED' | 'UNKNOWN';
+  rawWR: number;
+  wins: number;
+  losses: number;
+  total: number;
+  description: string;
+}
+
+interface ProvenEdgesResponse {
+  stats: { total: number; tier1: number; tier2: number; tier3: number; blocked: number; bestWR: number; avgWR: number };
+  edges: ProvenEdge[];
+  blockedPatterns: Record<string, { wr: number; reason: string }>;
+}
+
+interface EdgeProfileResponse {
+  summary: { greenCount: number; yellowCount: number; redCount: number; greyCount: number; totalCombos: number };
+  greenEdges: Array<{ patternType: string; session: string; asset: string; classification: string; bayesianWR: number; rawWR: number; sampleSize: number; wins: number; losses: number; pValue: number }>;
+  redEdges: Array<{ patternType: string; session: string; asset: string; classification: string; bayesianWR: number; rawWR: number; sampleSize: number }>;
+}
+
 // ─── Market Engine Types ────────────────────────────────────────────────────
 
 interface MarketEngineStatusPanel {
@@ -667,6 +691,10 @@ export default function TradingDashboard() {
   // Learning engine state
   const [learningReport, setLearningReport] = useState<any>(null);
 
+  // Proven edges state
+  const [provenEdges, setProvenEdges] = useState<ProvenEdgesResponse | null>(null);
+  const [edgeProfile, setEdgeProfile] = useState<EdgeProfileResponse | null>(null);
+
   // ─── Fetch functions ─────────────────────────────────────────────────────
 
   const fetchStats = useCallback(async () => {
@@ -749,6 +777,20 @@ export default function TradingDashboard() {
     } catch (err) { console.error("Error fetching learning report:", err); }
   }, []);
 
+  const fetchProvenEdges = useCallback(async () => {
+    try {
+      const res = await fetch("/api/proven-edges");
+      if (res.ok) setProvenEdges(await res.json());
+    } catch (err) { console.error("Error fetching proven edges:", err); }
+  }, []);
+
+  const fetchEdgeProfile = useCallback(async () => {
+    try {
+      const res = await fetch("/api/edge-profile");
+      if (res.ok) setEdgeProfile(await res.json());
+    } catch (err) { console.error("Error fetching edge profile:", err); }
+  }, []);
+
   // ─── Effects ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -757,7 +799,9 @@ export default function TradingDashboard() {
     fetchAutoTrader();
     fetchSetupScores();
     fetchMarketEngineStatus();
-  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus]);
+    fetchProvenEdges();
+    fetchEdgeProfile();
+  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchProvenEdges, fetchEdgeProfile]);
 
   useEffect(() => { fetchSignals(); }, [fetchSignals]);
 
@@ -766,7 +810,8 @@ export default function TradingDashboard() {
     if (activeTab === "setup-scores") fetchSetupScores();
     if (activeTab === "auto-trader") fetchAutoTrader();
     if (activeTab === "learning" && !learningReport) fetchLearningReport();
-  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader, fetchLearningReport, learningReport]);
+    if (activeTab === "edges") { fetchProvenEdges(); fetchEdgeProfile(); }
+  }, [activeTab, insights, fetchInsights, fetchSetupScores, fetchAutoTrader, fetchLearningReport, learningReport, fetchProvenEdges, fetchEdgeProfile]);
 
   // Auto-refresh every 10 seconds
   useEffect(() => {
@@ -777,9 +822,10 @@ export default function TradingDashboard() {
       if (activeTab === "auto-trader" || activeTab === "motor") fetchAutoTrader();
       if (activeTab === "setup-scores") fetchSetupScores();
       if (activeTab === "motor") fetchMarketEngineStatus();
+      if (activeTab === "edges") { fetchProvenEdges(); fetchEdgeProfile(); }
     }, 10000);
     return () => clearInterval(interval);
-  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, activeTab]);
+  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchProvenEdges, fetchEdgeProfile, activeTab]);
 
   // Auto check-pending signals every 60 seconds (replaces frequent cron on Vercel Hobby)
   useEffect(() => {
@@ -1054,6 +1100,9 @@ export default function TradingDashboard() {
               </TabsTrigger>
               <TabsTrigger value="setup-scores" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
                 <Target className="size-3.5 mr-1" /> Setup Scores
+              </TabsTrigger>
+              <TabsTrigger value="edges" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
+                <Shield className="size-3.5 mr-1" /> Proven Edges
               </TabsTrigger>
               <TabsTrigger value="patrones" className="data-[state=active]:bg-[#00ff88]/15 data-[state=active]:text-[#00ff88] text-xs">
                 <Layers className="size-3.5 mr-1" /> Patrones
@@ -1818,6 +1867,352 @@ export default function TradingDashboard() {
                   </ScrollArea>
                 </CardContent>
               </Card>
+            </motion.div>
+          </TabsContent>
+
+          {/* ─── TAB: PROVEN EDGES ──────────────────────────────────────────── */}
+          <TabsContent value="edges">
+            <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 mt-4">
+
+              {/* Section A: Edge Profile Summary */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Shield className="size-4 text-[#00ff88]" />
+                    Edge Profile Summary
+                    {edgeProfile && (
+                      <Badge className="bg-white/10 text-white/50 text-[10px] ml-2">
+                        {edgeProfile.summary.totalCombos} combos
+                      </Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {edgeProfile ? (
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div className="rounded-lg bg-[#00ff88]/10 border border-[#00ff88]/20 p-3 text-center">
+                        <CheckCircle className="size-5 text-[#00ff88] mx-auto mb-1" />
+                        <div className="text-2xl font-bold text-[#00ff88]">{edgeProfile.summary.greenCount}</div>
+                        <div className="text-[10px] text-[#00ff88]/70 uppercase tracking-wide">GREEN</div>
+                      </div>
+                      <div className="rounded-lg bg-[#ffaa00]/10 border border-[#ffaa00]/20 p-3 text-center">
+                        <AlertTriangle className="size-5 text-[#ffaa00] mx-auto mb-1" />
+                        <div className="text-2xl font-bold text-[#ffaa00]">{edgeProfile.summary.yellowCount}</div>
+                        <div className="text-[10px] text-[#ffaa00]/70 uppercase tracking-wide">YELLOW</div>
+                      </div>
+                      <div className="rounded-lg bg-[#ff3366]/10 border border-[#ff3366]/20 p-3 text-center">
+                        <XCircle className="size-5 text-[#ff3366] mx-auto mb-1" />
+                        <div className="text-2xl font-bold text-[#ff3366]">{edgeProfile.summary.redCount}</div>
+                        <div className="text-[10px] text-[#ff3366]/70 uppercase tracking-wide">RED</div>
+                      </div>
+                      <div className="rounded-lg bg-white/5 border border-white/10 p-3 text-center">
+                        <MinusCircle className="size-5 text-white/40 mx-auto mb-1" />
+                        <div className="text-2xl font-bold text-white/40">{edgeProfile.summary.greyCount}</div>
+                        <div className="text-[10px] text-white/30 uppercase tracking-wide">GREY</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="size-5 text-[#00ff88] animate-spin mr-2" />
+                      <span className="text-white/30 text-xs">Cargando edge profile...</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
+              {/* Section B: Proven Edges by Tier */}
+              {provenEdges && (
+                <div className="space-y-3">
+                  {/* Stats row */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <StatCard title="Total Edges" value={provenEdges.stats.total} icon={<Shield className="size-4" />} color={NEON_BLUE} subtitle={`${provenEdges.stats.avgWR}% avg WR`} />
+                    <StatCard title="TIER 1" value={provenEdges.stats.tier1} icon={<TrendingUp className="size-4" />} color={NEON_GREEN} subtitle={`Best: ${provenEdges.stats.bestWR}%`} />
+                    <StatCard title="TIER 2" value={provenEdges.stats.tier2} icon={<Target className="size-4" />} color={NEON_YELLOW} />
+                    <StatCard title="TIER 3" value={provenEdges.stats.tier3} icon={<MinusCircle className="size-4" />} color={NEON_CYAN} />
+                  </div>
+
+                  {/* TIER 1 */}
+                  {provenEdges.edges.filter(e => e.tier === 'TIER_1').length > 0 && (
+                    <Card className="bg-[#111827] border-[#00ff88]/20">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-[#00ff88]" />
+                          <span className="text-[#00ff88]">TIER 1</span>
+                          <Badge className="bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30 text-[10px]">
+                            {provenEdges.edges.filter(e => e.tier === 'TIER_1').length} edges
+                          </Badge>
+                          <span className="text-white/30 text-xs ml-auto">WR ≥ 60%</span>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {provenEdges.edges.filter(e => e.tier === 'TIER_1').map((edge, i) => (
+                            <div key={i} className="rounded-lg bg-[#00ff88]/5 border border-[#00ff88]/10 p-3">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2">
+                                  {PATTERN_ICONS[edge.pattern] || <CircleDot className="size-4 text-[#00ff88]" />}
+                                  <span className="text-sm font-medium text-white">{PATTERN_NAMES[edge.pattern] || edge.pattern}</span>
+                                  <SessionBadge session={edge.session} />
+                                  <Badge className="bg-white/10 text-white/60 text-[10px]">{edge.asset}</Badge>
+                                </div>
+                                <div className="flex items-center gap-3">
+                                  <div className="text-right">
+                                    <div className="text-sm font-bold text-[#00ff88]">{edge.rawWR.toFixed(1)}%</div>
+                                    <div className="text-[10px] text-white/30">Win Rate</div>
+                                  </div>
+                                </div>
+                              </div>
+                              <div className="mt-2 flex items-center gap-4">
+                                <div className="flex-1">
+                                  <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full bg-[#00ff88]" style={{ width: `${edge.rawWR}%` }} />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 text-[10px]">
+                                  <span className="text-[#00ff88]">{edge.wins}W</span>
+                                  <span className="text-white/20">/</span>
+                                  <span className="text-[#ff3366]">{edge.losses}L</span>
+                                  <span className="text-white/20">({edge.total})</span>
+                                </div>
+                              </div>
+                              {edge.description && (
+                                <p className="text-[10px] text-white/40 mt-1.5">{edge.description}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* TIER 2 */}
+                  {provenEdges.edges.filter(e => e.tier === 'TIER_2').length > 0 && (
+                    <Card className="bg-[#111827] border-[#ffaa00]/20">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-[#ffaa00]" />
+                          <span className="text-[#ffaa00]">TIER 2</span>
+                          <Badge className="bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30 text-[10px]">
+                            {provenEdges.edges.filter(e => e.tier === 'TIER_2').length} edges
+                          </Badge>
+                          <span className="text-white/30 text-xs ml-auto">WR 55–60%</span>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {provenEdges.edges.filter(e => e.tier === 'TIER_2').map((edge, i) => (
+                            <div key={i} className="rounded-lg bg-[#ffaa00]/5 border border-[#ffaa00]/10 p-3">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2">
+                                  {PATTERN_ICONS[edge.pattern] || <CircleDot className="size-4 text-[#ffaa00]" />}
+                                  <span className="text-sm font-medium text-white">{PATTERN_NAMES[edge.pattern] || edge.pattern}</span>
+                                  <SessionBadge session={edge.session} />
+                                  <Badge className="bg-white/10 text-white/60 text-[10px]">{edge.asset}</Badge>
+                                </div>
+                                <div className="text-sm font-bold text-[#ffaa00]">{edge.rawWR.toFixed(1)}%</div>
+                              </div>
+                              <div className="mt-2 flex items-center gap-4">
+                                <div className="flex-1">
+                                  <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full bg-[#ffaa00]" style={{ width: `${edge.rawWR}%` }} />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 text-[10px]">
+                                  <span className="text-[#00ff88]">{edge.wins}W</span>
+                                  <span className="text-white/20">/</span>
+                                  <span className="text-[#ff3366]">{edge.losses}L</span>
+                                  <span className="text-white/20">({edge.total})</span>
+                                </div>
+                              </div>
+                              {edge.description && (
+                                <p className="text-[10px] text-white/40 mt-1.5">{edge.description}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* TIER 3 */}
+                  {provenEdges.edges.filter(e => e.tier === 'TIER_3').length > 0 && (
+                    <Card className="bg-[#111827] border-[#00ffcc]/20">
+                      <CardHeader className="pb-2">
+                        <CardTitle className="text-sm flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-[#00ffcc]" />
+                          <span className="text-[#00ffcc]">TIER 3</span>
+                          <Badge className="bg-[#00ffcc]/15 text-[#00ffcc] border-[#00ffcc]/30 text-[10px]">
+                            {provenEdges.edges.filter(e => e.tier === 'TIER_3').length} edges
+                          </Badge>
+                          <span className="text-white/30 text-xs ml-auto">WR 50–55%</span>
+                        </CardTitle>
+                      </CardHeader>
+                      <CardContent>
+                        <div className="space-y-2">
+                          {provenEdges.edges.filter(e => e.tier === 'TIER_3').map((edge, i) => (
+                            <div key={i} className="rounded-lg bg-[#00ffcc]/5 border border-[#00ffcc]/10 p-3">
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2">
+                                  {PATTERN_ICONS[edge.pattern] || <CircleDot className="size-4 text-[#00ffcc]" />}
+                                  <span className="text-sm font-medium text-white">{PATTERN_NAMES[edge.pattern] || edge.pattern}</span>
+                                  <SessionBadge session={edge.session} />
+                                  <Badge className="bg-white/10 text-white/60 text-[10px]">{edge.asset}</Badge>
+                                </div>
+                                <div className="text-sm font-bold text-[#00ffcc]">{edge.rawWR.toFixed(1)}%</div>
+                              </div>
+                              <div className="mt-2 flex items-center gap-4">
+                                <div className="flex-1">
+                                  <div className="w-full h-2 bg-white/5 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full bg-[#00ffcc]" style={{ width: `${edge.rawWR}%` }} />
+                                  </div>
+                                </div>
+                                <div className="flex items-center gap-2 text-[10px]">
+                                  <span className="text-[#00ff88]">{edge.wins}W</span>
+                                  <span className="text-white/20">/</span>
+                                  <span className="text-[#ff3366]">{edge.losses}L</span>
+                                  <span className="text-white/20">({edge.total})</span>
+                                </div>
+                              </div>
+                              {edge.description && (
+                                <p className="text-[10px] text-white/40 mt-1.5">{edge.description}</p>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+                </div>
+              )}
+
+              {!provenEdges && (
+                <div className="flex items-center justify-center py-12">
+                  <Loader2 className="size-6 text-[#00ff88] animate-spin mr-2" />
+                  <span className="text-white/30 text-sm">Cargando proven edges...</span>
+                </div>
+              )}
+
+              {/* Section C: Blocked Patterns */}
+              {provenEdges?.blockedPatterns && Object.keys(provenEdges.blockedPatterns).length > 0 && (
+                <Card className="bg-[#111827] border-[#ff3366]/20">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-sm flex items-center gap-2">
+                      <AlertOctagon className="size-4 text-[#ff3366]" />
+                      <span className="text-[#ff3366]">Blocked Patterns</span>
+                      <Badge className="bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30 text-[10px]">
+                        {Object.keys(provenEdges.blockedPatterns).length} bloqueados
+                      </Badge>
+                    </CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="space-y-2">
+                      {Object.entries(provenEdges.blockedPatterns).map(([pattern, data]) => (
+                        <div key={pattern} className="rounded-lg bg-[#ff3366]/5 border border-[#ff3366]/10 p-3">
+                          <div className="flex items-center justify-between gap-2 flex-wrap">
+                            <div className="flex items-center gap-2">
+                              {PATTERN_ICONS[pattern] || <XCircle className="size-4 text-[#ff3366]" />}
+                              <span className="text-sm font-medium text-white">{PATTERN_NAMES[pattern] || pattern}</span>
+                            </div>
+                            <Badge className="bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30 text-[10px]">
+                              WR {data.wr.toFixed(1)}%
+                            </Badge>
+                          </div>
+                          <p className="text-[10px] text-[#ff3366]/70 mt-1.5">{data.reason}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
+
+              {/* Section D: Edge Profile Details Table */}
+              <Card className="bg-[#111827] border-white/10">
+                <CardHeader className="pb-2">
+                  <CardTitle className="text-sm flex items-center gap-2">
+                    <Layers className="size-4 text-[#00aaff]" />
+                    Edge Profile Details
+                    {edgeProfile && (
+                      <Badge className="bg-white/10 text-white/50 text-[10px] ml-2">
+                        {edgeProfile.greenEdges.length + (edgeProfile.redEdges?.length || 0)} edges
+                      </Badge>
+                    )}
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  {edgeProfile ? (
+                    <ScrollArea className="max-h-96">
+                      <Table>
+                        <TableHeader>
+                          <TableRow className="border-white/10 hover:bg-transparent">
+                            <TableHead className="text-[10px] text-white/40">Pattern</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Session</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Asset</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Class</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Bayesian WR</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Raw WR</TableHead>
+                            <TableHead className="text-[10px] text-white/40">Sample</TableHead>
+                            <TableHead className="text-[10px] text-white/40">p-Value</TableHead>
+                          </TableRow>
+                        </TableHeader>
+                        <TableBody>
+                          {[
+                            ...edgeProfile.greenEdges.map(e => ({ ...e, classification: 'GREEN' })),
+                            ...edgeProfile.redEdges.map(e => ({ ...e, classification: 'RED' })),
+                          ]
+                            .sort((a, b) => {
+                              const classOrder: Record<string, number> = { GREEN: 0, YELLOW: 1, RED: 2, GREY: 3 };
+                              const aOrder = classOrder[a.classification] ?? 4;
+                              const bOrder = classOrder[b.classification] ?? 4;
+                              if (aOrder !== bOrder) return aOrder - bOrder;
+                              return (b.bayesianWR ?? 0) - (a.bayesianWR ?? 0);
+                            })
+                            .map((entry, i) => {
+                              const classColor = entry.classification === 'GREEN' ? NEON_GREEN : entry.classification === 'YELLOW' ? NEON_YELLOW : entry.classification === 'RED' ? NEON_RED : '#666';
+                              return (
+                                <TableRow key={i} className="border-white/5 hover:bg-white/5">
+                                  <TableCell className="text-[10px] font-medium text-white/80">
+                                    <div className="flex items-center gap-1.5">
+                                      {PATTERN_ICONS[entry.patternType] || <CircleDot className="size-3" style={{ color: classColor }} />}
+                                      {PATTERN_NAMES[entry.patternType] || entry.patternType}
+                                    </div>
+                                  </TableCell>
+                                  <TableCell className="text-[10px]">
+                                    <SessionBadge session={entry.session} />
+                                  </TableCell>
+                                  <TableCell className="text-[10px] text-white/60">{entry.asset}</TableCell>
+                                  <TableCell>
+                                    <Badge className="text-[10px] px-1.5 py-0 border" style={{ backgroundColor: `${classColor}15`, color: classColor, borderColor: `${classColor}30` }}>
+                                      {entry.classification}
+                                    </Badge>
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: classColor }}>
+                                    {(entry.bayesianWR ?? 0).toFixed(1)}%
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono text-white/60">
+                                    {(entry.rawWR ?? 0).toFixed(1)}%
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono text-white/40">
+                                    {entry.sampleSize ?? '—'}
+                                  </TableCell>
+                                  <TableCell className="text-[10px] font-mono" style={{ color: (entry as any).pValue != null && (entry as any).pValue < 0.05 ? NEON_GREEN : '#666' }}>
+                                    {(entry as any).pValue != null ? (entry as any).pValue.toFixed(3) : '—'}
+                                  </TableCell>
+                                </TableRow>
+                              );
+                            })
+                          }
+                        </TableBody>
+                      </Table>
+                    </ScrollArea>
+                  ) : (
+                    <div className="flex items-center justify-center py-8">
+                      <Loader2 className="size-5 text-[#00aaff] animate-spin mr-2" />
+                      <span className="text-white/30 text-xs">Cargando edge profile details...</span>
+                    </div>
+                  )}
+                </CardContent>
+              </Card>
+
             </motion.div>
           </TabsContent>
 
