@@ -1,7 +1,11 @@
-// AUTO-TRADER ENGINE v3 — Full Statistical Pipeline + Multi-Timeframe Confluence
-// Market Data → Indicators → Patterns → Session → Regime → MTF → Features → Quality → Bayesian → Expectancy → Signal
-// The goal is to BUILD THE DATASET with maximum feature richness for later analysis
+// AUTO-TRADER ENGINE v4 — Edge Profile + Full Statistical Pipeline + Multi-Timeframe Confluence
+// Market Data → Indicators → Patterns → Session → Regime → MTF → Features → Quality → Edge Profile → Bayesian → Expectancy → Signal
+// The goal is to ONLY TRADE what has a PROVEN EDGE. Everything else is NO OPERAR.
 // "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
+// v4: Added Edge Profile — GREEN/YELLOW/RED/GREY classification of all setup combos.
+//     RED combos → hard NO OPERAR (confirmed losers from backtest).
+//     GREEN combos → confidence boost + priority.
+//     YELLOW combos → cautious trading only with high confidence.
 
 import { db } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
@@ -16,6 +20,7 @@ import { checkQuality, quickQualityScore, toQualityFeatures, type QualityResult,
 import { calculateBayesianStats, quickBayesianWR } from './bayesian-engine';
 import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './expectancy-engine';
 import { quickMTFScore, type MTFConfluence } from './mtf-analysis';
+import { getEdgeDecision, type EdgeClassification, type EdgeDecision, invalidateEdgeProfileCache } from './edge-profile';
 
 // === TYPES ===
 
@@ -64,7 +69,7 @@ export interface SignalGenerationResult {
   dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK';
   skipped: boolean;
   skipReason?: string;
-  // === NEW: Phase 4 fields ===
+  // === Phase 4 fields ===
   regime: MarketRegime | null;
   regimeConfidence: number;
   features: SignalFeatures | null;
@@ -75,13 +80,16 @@ export interface SignalGenerationResult {
   expectancy: number;
   riskReward: number;
   adjustedWR: number;
-  // === NEW: Phase 5 MTF fields ===
+  // === Phase 5 MTF fields ===
   mtfConfluence: MTFConfluence | null;
   mtfScore: number;
   mtfDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   h1Filter: 'PASS' | 'FAIL' | 'NO_DATA';
   h4Filter: 'PASS' | 'FAIL' | 'NO_DATA';
   entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' | 'DANGEROUS';
+  // === Phase 6 Edge Profile fields ===
+  edgeClassification: EdgeClassification;
+  edgeReason: string;
 }
 
 // === DEFAULT CONFIG ===
@@ -262,13 +270,18 @@ export async function generateAutoSignal(
   let riskReward = 1;
   let adjustedWR = 50;
 
-  // === NEW Phase 5: MTF fields ===
+  // === Phase 5: MTF fields ===
   let mtfConfluence: MTFConfluence | null = null;
   let mtfScore = 0;
   let mtfDirection: 'BULLISH' | 'BEARISH' | 'NEUTRAL' = 'NEUTRAL';
   let h1Filter: 'PASS' | 'FAIL' | 'NO_DATA' = 'NO_DATA';
   let h4Filter: 'PASS' | 'FAIL' | 'NO_DATA' = 'NO_DATA';
   let entryQuality: 'EXCELLENT' | 'GOOD' | 'FAIR' | 'POOR' | 'DANGEROUS' = 'FAIR';
+
+  // === Phase 6: Edge Profile fields ===
+  let edgeClassification: EdgeClassification = 'GREY';
+  let edgeDecision: EdgeDecision | null = null;
+  let edgeReason = '';
   
   // Step 1: Get market data - try REAL market engine first, then fall back to DB
   let candles: any[] = [];
@@ -321,6 +334,8 @@ export async function generateAutoSignal(
       // MTF fields
       mtfConfluence: null, mtfScore: 0, mtfDirection: 'NEUTRAL',
       h1Filter: 'NO_DATA', h4Filter: 'NO_DATA', entryQuality: 'FAIR',
+      // Edge Profile fields
+      edgeClassification: 'GREY', edgeReason: 'Datos insuficientes para clasificar edge',
     };
   }
   
@@ -524,6 +539,53 @@ export async function generateAutoSignal(
     }
   }
   
+  // ═══ Step 6.8: EDGE PROFILE CHECK (Phase 6) ═══
+  // This is the MOST IMPORTANT filter in the pipeline.
+  // It checks if the pattern+session+asset combo has a PROVEN EDGE from backtest data.
+  // RED combos → hard NO OPERAR (confirmed losers, even in data collection mode)
+  // GREEN combos → confidence boost
+  // YELLOW combos → cautious, only with high confidence
+  // GREY combos → depends on mode
+
+  try {
+    edgeDecision = await getEdgeDecision(
+      bestPattern?.type || null,
+      session.session,
+      asset,
+      confidence,
+      isDataCollectionMode
+    );
+    edgeClassification = edgeDecision.classification;
+    edgeReason = edgeDecision.reason;
+
+    if (edgeClassification === 'RED') {
+      // HARD BLOCK: This combo is a confirmed loser from backtest data.
+      // Even in data collection mode, we don't want to trade confirmed losers.
+      direction = 'NO_OPERAR';
+      reason = edgeDecision.reason;
+      confidence = Math.max(0, Math.min(confidence + edgeDecision.confidenceAdjustment, 15));
+    } else if (edgeClassification === 'GREEN') {
+      // CONFIRMED EDGE: Boost confidence and setup score
+      confidence = Math.min(100, confidence + edgeDecision.confidenceAdjustment);
+      reason += ` [EDGE: ${edgeDecision.reason}]`;
+    } else if (edgeClassification === 'YELLOW') {
+      // MARGINAL EDGE: Apply if confidence is high enough
+      confidence = Math.max(0, confidence + edgeDecision.confidenceAdjustment);
+      if (!edgeDecision.shouldTrade && !isDataCollectionMode) {
+        direction = 'NO_OPERAR';
+        reason = edgeDecision.reason;
+      } else if (!edgeDecision.shouldTrade && isDataCollectionMode) {
+        reason += ` [EDGE AMARILLO: Confianza baja pero generando para dataset]`;
+      } else {
+        reason += ` [EDGE: ${edgeDecision.reason}]`;
+      }
+    }
+    // GREY: no edge data, continue with normal pipeline
+  } catch (err: any) {
+    // Edge profile check is best-effort — don't block signal generation
+    console.error('Edge profile check failed:', err.message);
+  }
+
   // Step 7: Adjust confidence with session and setup score
   confidence = Math.min(100, Math.max(0, confidence + sessionCheck.adjustedConfidence));
   
@@ -735,6 +797,9 @@ export async function generateAutoSignal(
     h1Filter,
     h4Filter,
     entryQuality,
+    // Edge Profile fields
+    edgeClassification,
+    edgeReason,
   };
 }
 
@@ -915,6 +980,9 @@ export async function updateSetupStats(signal: {
     // Unique constraint might fail for concurrent writes, that's OK
     console.error('Error updating setup stats:', e);
   }
+
+  // Invalidate edge profile cache so it picks up the new data
+  invalidateEdgeProfileCache();
 }
 
 // === GET AUTO-TRADER STATE ===
