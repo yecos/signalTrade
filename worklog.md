@@ -104,3 +104,28 @@ Stage Summary:
 - Patrones tab shows historical data from edge-profile
 - Historial shows Expiry and Edge classification
 - Proven edge info persisted to database
+---
+Task ID: 8
+Agent: Main Agent
+Task: Phase 8 - Execution Engine: Build complete trading execution system
+
+Work Log:
+- Analyzed gap between current system (signal generation) and actual trading execution
+- Added 3 new Prisma models: Trade, Position, Account with full schema
+- Created auto-migration system for new tables (CREATE TABLE IF NOT EXISTS)
+- Built BybitClient with HMAC-SHA256 signed REST API (order placement, position management, account queries)
+- Built PaperTradingClient for simulated trading with realistic slippage (0.01-0.05%)
+- Built RiskManager with 8 safety layers: circuit breaker, min balance, daily loss limit, max drawdown, max positions, same asset check, cooldown after loss, proven edge requirement
+- Built ExecutionEngine: Signal → Risk Assessment → Order Placement → Position Tracking → SL/TP/Expiry Close → P&L Recording
+- Integrated auto-execution into runAutoTraderCycle (reads autoExecution setting from DB)
+- Created /api/trading endpoint with 9 actions: close-position, close-all, check-sltp, check-expired, update-risk-config, deactivate-circuit-breaker, set-balance, set-broker-keys, execute-signal
+- Added Trading tab to dashboard with: account status, circuit breaker alerts, open positions table, recent trades table, trading stats, auto-execution controls
+- Build successful, deployed to production
+
+Stage Summary:
+- Full execution pipeline: Signal → Risk Check → Order → Position → Close → P&L
+- Kelly criterion position sizing with quarter-Kelly safety fraction
+- ATR-based stop loss (1.5x ATR) with configurable risk/reward ratio
+- Paper trading mode default for safety, LIVE mode requires explicit enable
+- Circuit breaker auto-activates on 10% drawdown
+- All new DB tables auto-migrate on first API call
