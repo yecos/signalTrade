@@ -157,7 +157,7 @@ export async function POST(request: NextRequest) {
       case 'close-all': {
         const positions = await db.position.findMany({ where: { status: 'OPEN' } });
         const engine = getExecutionEngine();
-        const results = [];
+        const results: any[] = [];
         for (const pos of positions) {
           const result = await engine.closePosition(pos.id, 'Cierre total desde dashboard');
           results.push(result);
@@ -229,10 +229,64 @@ export async function POST(request: NextRequest) {
             isLive: !testnet,
           },
         });
+        // Reset execution engine to pick up new credentials
+        const { resetExecutionEngine } = await import('@/lib/execution-engine');
+        const { resetBrokerClient } = await import('@/lib/broker-client');
+        resetExecutionEngine();
+        resetBrokerClient();
         return NextResponse.json({
           success: true,
-          message: `Bybit ${testnet ? 'TESTNET' : 'MAINNET'} keys configuradas. Reinicia el worker para aplicar.`,
+          message: `Bybit ${testnet ? 'TESTNET' : 'MAINNET'} keys configuradas. Engine reiniciado.`,
         });
+      }
+
+      // === TEST BROKER CONNECTION ===
+      case 'test-connection': {
+        const { resetExecutionEngine } = await import('@/lib/execution-engine');
+        const { resetBrokerClient } = await import('@/lib/broker-client');
+        resetExecutionEngine();
+        resetBrokerClient();
+        const engine = getExecutionEngine();
+        const result = await engine.testConnection();
+        return NextResponse.json(result);
+      }
+
+      // === ENABLE AUTO-EXECUTION ===
+      case 'enable-auto-execution': {
+        const { mode } = body; // 'PAPER' or 'LIVE'
+        const execMode = mode === 'LIVE' ? 'LIVE' : 'PAPER';
+        await db.appSettings.upsert({
+          where: { key: 'autoExecution' },
+          create: { key: 'autoExecution', value: JSON.stringify({ enabled: true, mode: execMode }), description: 'Auto-execution configuration' },
+          update: { value: JSON.stringify({ enabled: true, mode: execMode }) },
+        });
+        return NextResponse.json({
+          success: true,
+          message: `Auto-ejecución HABILITADA en modo ${execMode}. Las señales aprobadas se ejecutarán automáticamente.`,
+          mode: execMode,
+        });
+      }
+
+      // === DISABLE AUTO-EXECUTION ===
+      case 'disable-auto-execution': {
+        const currentSetting = await db.appSettings.findUnique({ where: { key: 'autoExecution' } });
+        const current = currentSetting ? JSON.parse(currentSetting.value) : { enabled: false, mode: 'PAPER' };
+        await db.appSettings.upsert({
+          where: { key: 'autoExecution' },
+          create: { key: 'autoExecution', value: JSON.stringify({ ...current, enabled: false }), description: 'Auto-execution configuration' },
+          update: { value: JSON.stringify({ ...current, enabled: false }) },
+        });
+        return NextResponse.json({
+          success: true,
+          message: 'Auto-ejecución DESHABILITADA. Solo se generarán señales sin ejecutar.',
+        });
+      }
+
+      // === GET AUTO-EXECUTION STATUS ===
+      case 'auto-execution-status': {
+        const execSetting = await db.appSettings.findUnique({ where: { key: 'autoExecution' } });
+        const execConfig = execSetting ? JSON.parse(execSetting.value) : { enabled: false, mode: 'PAPER' };
+        return NextResponse.json(execConfig);
       }
 
       // === EXECUTE SIGNAL (manual execution) ===
@@ -283,7 +337,7 @@ export async function POST(request: NextRequest) {
 
       default:
         return NextResponse.json(
-          { error: 'Acción inválida. Usa: close-position, close-all, check-sltp, check-expired, update-risk-config, deactivate-circuit-breaker, set-balance, set-broker-keys, execute-signal' },
+          { error: 'Acción inválida. Usa: close-position, close-all, check-sltp, check-expired, update-risk-config, deactivate-circuit-breaker, set-balance, set-broker-keys, test-connection, enable-auto-execution, disable-auto-execution, auto-execution-status, execute-signal' },
           { status: 400 }
         );
     }

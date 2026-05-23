@@ -11,8 +11,8 @@
 // 6. Trade result is recorded with P&L, slippage, journal
 
 import { db } from './db';
-import { getBrokerClient, assetToSymbol, isCryptoAsset, type BybitClient, type PaperTradingClient, type OrderResult } from './broker-client';
-import { assessRisk, getOrCreateAccount, updateAccountBalance, getRiskConfig } from './risk-manager';
+import { getBrokerClientFromDB, assetToSymbol, isCryptoAsset, type BybitClient, type PaperTradingClient, type OrderResult } from './broker-client';
+import { assessRisk, getOrCreateAccount, updateAccountBalance } from './risk-manager';
 
 // === TYPES ===
 
@@ -74,12 +74,32 @@ export interface PositionCloseResult {
 
 export class ExecutionEngine {
   private mode: ExecutionMode;
-  private brokerClient: BybitClient | PaperTradingClient;
+  private brokerClient: BybitClient | PaperTradingClient | null = null;
+  private _modeExplicitlySet: boolean;
 
   constructor(mode?: ExecutionMode) {
     // Default to PAPER for safety — LIVE must be explicitly requested
     this.mode = mode || 'PAPER';
-    this.brokerClient = getBrokerClient();
+    this._modeExplicitlySet = !!mode;
+    // Broker client is lazy-loaded from DB on first use
+  }
+
+  // Lazy-load broker client from DB credentials
+  private async getBroker(): Promise<BybitClient | PaperTradingClient> {
+    if (!this.brokerClient) {
+      this.brokerClient = await getBrokerClientFromDB();
+      // Update mode based on actual broker type
+      if (this.brokerClient instanceof PaperTradingClient) {
+        this.mode = 'PAPER';
+      } else if (this.brokerClient instanceof BybitClient) {
+        // If broker is real Bybit but mode wasn't explicitly set to LIVE, keep PAPER behavior
+        if (this._modeExplicitlySet && this.mode === 'LIVE') {
+          this.mode = 'LIVE';
+        }
+        // Otherwise stays as PAPER for safety (even though the client is real)
+      }
+    }
+    return this.brokerClient;
   }
 
   // === MAIN ENTRY: EXECUTE SIGNAL ===
@@ -140,14 +160,15 @@ export class ExecutionEngine {
       };
     }
 
-    // ═══ STEP 2: GET CURRENT PRICE ═══
+    // ═══ STEP 2: GET BROKER CLIENT + CURRENT PRICE ═══
+    const broker = await this.getBroker();
     const symbol = assetToSymbol(req.asset);
     let fillPrice = req.currentPrice || req.entryPrice;
 
     // Try to get real-time price from broker
     if (this.mode === 'LIVE' && isCryptoAsset(req.asset)) {
       try {
-        const lastPrice = await this.brokerClient.getLastPrice(symbol);
+        const lastPrice = await broker.getLastPrice(symbol);
         if (lastPrice) fillPrice = lastPrice;
       } catch (err) {
         console.warn('[EXEC] Could not get live price, using signal price');
@@ -156,7 +177,7 @@ export class ExecutionEngine {
 
     // ═══ STEP 3: PLACE ORDER ═══
     const side = req.direction === 'HIGHER' ? 'Buy' : 'Sell';
-    const orderResult: OrderResult = await this.brokerClient.placeOrder({
+    const orderResult: OrderResult = await broker.placeOrder({
       symbol,
       side,
       orderType: 'MARKET',
@@ -297,13 +318,16 @@ export class ExecutionEngine {
       return { success: false, tradeId: null, reason: 'Position not found or already closed' };
     }
 
+    // Get broker client
+    const broker = await this.getBroker();
+
     // Get current price
     const symbol = assetToSymbol(position.asset);
     let closePrice = position.currentPrice || position.entryPrice;
 
     if (this.mode === 'LIVE' && isCryptoAsset(position.asset)) {
       try {
-        const lastPrice = await this.brokerClient.getLastPrice(symbol);
+        const lastPrice = await broker.getLastPrice(symbol);
         if (lastPrice) closePrice = lastPrice;
       } catch { /* use current price */ }
     }
@@ -312,10 +336,10 @@ export class ExecutionEngine {
     const side = position.direction === 'BUY' ? 'Sell' : 'Buy';
     let closeResult: OrderResult;
 
-    if (this.brokerClient instanceof PaperTradingClient) {
-      closeResult = await (this.brokerClient as PaperTradingClient).closePosition(symbol, closePrice);
+    if (broker instanceof PaperTradingClient) {
+      closeResult = await (broker as PaperTradingClient).closePosition(symbol, closePrice);
     } else {
-      closeResult = await (this.brokerClient as BybitClient).closePosition(symbol, side as any, position.quantity);
+      closeResult = await (broker as BybitClient).closePosition(symbol, side as any, position.quantity);
     }
 
     const actualClosePrice = closeResult.fillPrice || closePrice;
@@ -385,7 +409,7 @@ export class ExecutionEngine {
         data: {
           exitPrice: actualClosePrice,
           result: signalResult,
-          priceDifference: actualClosePrice - trade.entryPrice!,
+          priceDifference: actualClosePrice - (trade.entryPrice || 0),
           estimatedProfit: realizedPnl > 0 ? realizedPnl : 0,
           estimatedLoss: realizedPnl < 0 ? Math.abs(realizedPnl) : 0,
           status: 'CLOSED',
@@ -443,7 +467,9 @@ export class ExecutionEngine {
       where: { status: 'OPEN' },
     });
 
+    const broker = await this.getBroker();
     let closed = 0;
+
     for (const pos of openPositions) {
       // Get current price
       const symbol = assetToSymbol(pos.asset);
@@ -451,7 +477,7 @@ export class ExecutionEngine {
 
       if (this.mode === 'LIVE' && isCryptoAsset(pos.asset)) {
         try {
-          const lastPrice = await this.brokerClient.getLastPrice(symbol);
+          const lastPrice = await broker.getLastPrice(symbol);
           if (lastPrice) currentPrice = lastPrice;
         } catch { /* use current */ }
       }
@@ -519,8 +545,10 @@ export class ExecutionEngine {
     todayTrades: number;
     todayPnl: number;
     circuitBreaker: boolean;
+    brokerType: string;
   }> {
-    const connCheck = await this.brokerClient.checkConnection();
+    const broker = await this.getBroker();
+    const connCheck = await broker.checkConnection();
     const account = await getOrCreateAccount();
     const openPositions = await db.position.count({ where: { status: 'OPEN' } });
 
@@ -550,7 +578,53 @@ export class ExecutionEngine {
       todayTrades,
       todayPnl,
       circuitBreaker: account.isCircuitBreaker,
+      brokerType: broker instanceof BybitClient ? 'BYBIT' : 'PAPER',
     };
+  }
+
+  // === TEST BROKER CONNECTION ===
+  // Verifies that the Bybit API keys work correctly
+
+  async testConnection(): Promise<{
+    connected: boolean;
+    latency: number;
+    testnet: boolean;
+    accountInfo?: any;
+    error?: string;
+  }> {
+    try {
+      const broker = await this.getBroker();
+      const connCheck = await broker.checkConnection();
+
+      if (!connCheck.ok) {
+        return { connected: false, latency: connCheck.latency, testnet: false, error: 'Connection failed' };
+      }
+
+      // If Bybit, also test authenticated endpoint
+      if (broker instanceof BybitClient) {
+        const accountInfo = await broker.getAccountInfo();
+        const ticker = await broker.getTicker('BTCUSDT');
+        return {
+          connected: true,
+          latency: connCheck.latency,
+          testnet: !this.mode || this.mode === 'PAPER',
+          accountInfo: accountInfo ? {
+            balance: accountInfo.balance,
+            equity: accountInfo.equity,
+            availableBalance: accountInfo.availableBalance,
+          } : null,
+          error: !accountInfo ? 'Could not fetch account info — check API key permissions' : undefined,
+        };
+      }
+
+      return {
+        connected: true,
+        latency: connCheck.latency,
+        testnet: true, // Paper trading
+      };
+    } catch (err: any) {
+      return { connected: false, latency: 0, testnet: false, error: err.message };
+    }
   }
 }
 

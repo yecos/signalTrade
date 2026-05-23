@@ -129,3 +129,23 @@ Stage Summary:
 - Paper trading mode default for safety, LIVE mode requires explicit enable
 - Circuit breaker auto-activates on 10% drawdown
 - All new DB tables auto-migrate on first API call
+
+---
+Task ID: 1
+Agent: Main Agent
+Task: Integrate Bybit API keys and execution engine
+
+Work Log:
+- Added `getBrokerClientFromDB()` to broker-client.ts — reads API keys from Account table in DB (preferred) with fallback to env vars
+- Updated ExecutionEngine to lazy-load broker client from DB credentials via `getBroker()` method
+- Added `getLastPrice()` and `getTicker()` to PaperTradingClient — uses Binance public API for real prices
+- Added new API actions to /api/trading: test-connection, enable-auto-execution, disable-auto-execution, auto-execution-status
+- Updated set-broker-keys action to reset execution engine after saving keys
+- Created .env with Bybit configuration placeholders
+- Fixed TypeScript error in close-all action (results array type)
+
+Stage Summary:
+- Execution engine now reads API keys from DB Account table
+- Paper trading gets real prices from Binance public API
+- Full API for configuring keys, testing connection, and enabling auto-execution
+- Build successful with no new errors

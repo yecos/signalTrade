@@ -486,6 +486,36 @@ export class PaperTradingClient {
       .reduce((sum, p) => sum + p.unrealizedPnl, 0);
   }
 
+  async getLastPrice(symbol: string): Promise<number | null> {
+    // For paper trading, fetch real price from Binance public API (no auth needed)
+    try {
+      const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
+      const data = await fetch(url).then(r => r.json());
+      return parseFloat(data.price);
+    } catch {
+      return null;
+    }
+  }
+
+  async getTicker(symbol: string): Promise<TickerInfo | null> {
+    try {
+      const url = `https://api.binance.com/api/v3/ticker/bookTicker?symbol=${symbol}`;
+      const data = await fetch(url).then(r => r.json());
+      const bid = parseFloat(data.bidPrice);
+      const ask = parseFloat(data.askPrice);
+      return {
+        symbol,
+        lastPrice: (bid + ask) / 2,
+        bid,
+        ask,
+        spread: ask - bid,
+        volume24h: 0,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   async checkConnection(): Promise<{ ok: boolean; latency: number }> {
     return { ok: true, latency: 1 }; // Paper trading always "connected"
   }
@@ -511,7 +541,7 @@ export function createBrokerClient(config?: BrokerConfig): BybitClient | PaperTr
   return new BybitClient(config);
 }
 
-// Export singleton getter that reads from env
+// Export singleton getter that reads from env OR DB Account table
 let _brokerClient: BybitClient | PaperTradingClient | null = null;
 
 export function getBrokerClient(): BybitClient | PaperTradingClient {
@@ -524,6 +554,31 @@ export function getBrokerClient(): BybitClient | PaperTradingClient {
     });
   }
   return _brokerClient;
+}
+
+// Create broker client from DB-stored credentials
+// This is the preferred method — reads API keys from the Account table
+export async function getBrokerClientFromDB(): Promise<BybitClient | PaperTradingClient> {
+  try {
+    const { db } = await import('./db');
+    const account = await db.account.findFirst({ where: { isActive: true } });
+
+    if (account && account.apiKey && account.apiSecret && account.broker === 'BYBIT') {
+      const testnet = !account.isLive; // isLive=false means testnet
+      console.log(`[BROKER] Using DB-stored Bybit ${testnet ? 'TESTNET' : 'MAINNET'} credentials`);
+      return new BybitClient({
+        broker: 'BYBIT',
+        apiKey: account.apiKey,
+        apiSecret: account.apiSecret,
+        testnet,
+      });
+    }
+  } catch (err: any) {
+    console.warn(`[BROKER] Could not read DB credentials: ${err.message}`);
+  }
+
+  // Fallback to env vars
+  return getBrokerClient();
 }
 
 export function resetBrokerClient(): void {
