@@ -52,3 +52,33 @@ Stage Summary:
 - TwelveData: Needs API key in Vercel env vars (TWELVEDATA_API_KEY)
 - All API routes working: /api/health, /api/debug, /api/signals, /api/market-data
 - Data quality: HIGH for crypto (CoinGecko), MEDIUM for forex (Frankfurter daily rates)
+
+---
+Task ID: 3
+Agent: Main
+Task: Backtest v2 + Edge Profile System (Phase 6)
+
+Work Log:
+- Backtester ran successfully: 3 months BTC/USD + ETH/USD, 7330 active signals
+- Overall WR: 47.5% (edge negativo en M5 con 10min expiración)
+- KEY FINDING: liquidity_sweep is the ONLY pattern with positive edge (55.7% WR)
+- Top edges: liquidity_sweep + NewYork + ETH (73.3% WR), liquidity_sweep + Asia + ETH (62.9%), liquidity_sweep + NewYork + BTC (62.5%)
+- breakout (43.9%), reversal (45.9%), none (46.9%) are confirmed losers
+- Created edge-profile.ts: Classifies pattern+session+asset combos as GREEN/YELLOW/RED/GREY
+  - GREEN: Bayesian WR > 55%, ≥30 samples, p < 0.1
+  - YELLOW: Bayesian WR > 50%, ≥20 samples
+  - RED: Bayesian WR < 48%, ≥30 samples → hard NO OPERAR
+  - GREY: insufficient data
+- Modified auto-trader v4: Added Edge Profile check as Step 6.8
+  - RED combos → NO OPERAR even in data collection mode (confirmed losers)
+  - GREEN combos → confidence boost up to +20
+  - YELLOW combos → cautious, only with ≥50% confidence
+- Created API endpoint: /api/edge-profile
+- Pushed to GitHub and deployed to Vercel
+
+Stage Summary:
+- Backtest data available but NOT YET SAVED to DB (--save-db not run yet)
+- Edge Profile system built and integrated into pipeline
+- Next: User needs to run `npx tsx scripts/backtest.ts --save-db` to feed SetupStats
+- After that, Edge Profile will classify combos from real backtest data
+- The pipeline now has the most important filter: don't trade confirmed losers
