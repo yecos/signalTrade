@@ -1,11 +1,13 @@
-// AUTO-TRADER ENGINE v5 — Proven Edge Filter + Full Statistical Pipeline
-// Market Data → Indicators → Patterns → Session → PROVEN EDGE FILTER → Regime → MTF → Quality → Edge Profile → Bayesian → Signal
-// The goal is to ONLY TRADE what has a PROVEN EDGE. Everything else is NO OPERAR.
+// AUTO-TRADER ENGINE v6 — 3-System Architecture: NoTrade → Confluence → TradeManagement
+// Pipeline: Market Data → Indicators → Patterns → Session → NoTrade Filter → Regime → MTF →
+//           Confluence Score → Setup Contextualizado → Trade Management → Signal
+// The goal is to ONLY TRADE when ALL conditions are favorable.
 // "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
-// v5: Added Proven Edge Filter — Hard allowlist from 6-month backtest.
-//     BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
-//     Only TIER_1/2/3 combos pass the filter.
-//     v4 Edge Profile still used for Bayesian adjustments on allowed combos.
+// v6: 3-System Architecture:
+//     1. NO-TRADE SYSTEM: Filtros de riesgo sistémico, regímenes, noticias, liquidez
+//     2. CONFLUENCE ENGINE: Score multi-factor + setup contextualizado
+//     3. TRADE MANAGER: Sizing automático ATR, gestión dinámica, alertas de cierre
+//     Previous systems (Proven Edge, Edge Profile, Bayesian) are still used as inputs.
 
 import { db } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
@@ -22,6 +24,10 @@ import { quickEV, estimateExpectancyFromStats, type ExpectancyResult } from './e
 import { quickMTFScore, type MTFConfluence } from './mtf-analysis';
 import { getEdgeDecision, type EdgeClassification, type EdgeDecision, invalidateEdgeProfileCache } from './edge-profile';
 import { checkProvenEdge, type EdgeTier, type ProvenEdge, getBlockedPatterns } from './proven-edges';
+import { assessNoTrade, type NoTradeAssessment } from './no-trade-system';
+import { assessConfluence, type ConfluenceResult, type ContextualizedSetup } from './confluence-engine';
+import { calculateATRBasedSize, createTradeManagementPlan, type TradeManagementPlan, type ExitAlert } from './trade-manager';
+import { getOrCreateAccount } from './risk-manager';
 
 // === TYPES ===
 
@@ -99,6 +105,10 @@ export interface SignalGenerationResult {
   provenEdgeTier: EdgeTier;
   provenEdgeAllowed: boolean;
   provenEdge: ProvenEdge | null;
+  // === Phase 8: 3-System Architecture fields ===
+  noTradeAssessment: NoTradeAssessment | null;
+  confluenceResult: ConfluenceResult | null;
+  tradeManagementPlan: TradeManagementPlan | null;
 }
 
 // === DEFAULT CONFIG ===
@@ -297,6 +307,12 @@ export async function generateAutoSignal(
   let provenEdgeTier: EdgeTier = 'UNKNOWN';
   let provenEdgeAllowed = false;
   let provenEdge: ProvenEdge | null = null;
+
+  // === Phase 8: 3-System Architecture fields ===
+  let noTradeAssessment: NoTradeAssessment | null = null;
+  let confluenceResult: ConfluenceResult | null = null;
+  let tradeManagementPlan: TradeManagementPlan | null = null;
+  let calculatedRR = riskReward; // Pre-declare for use in confluence
   
   // Step 1: Get market data - try REAL market engine first, then fall back to DB
   let candles: any[] = [];
@@ -353,6 +369,8 @@ export async function generateAutoSignal(
       edgeClassification: 'GREY', edgeReason: 'Datos insuficientes para clasificar edge',
       // Proven Edge fields
       provenEdgeTier: 'UNKNOWN', provenEdgeAllowed: false, provenEdge: null,
+      // Phase 8: 3-System Architecture fields
+      noTradeAssessment: null, confluenceResult: null, tradeManagementPlan: null,
     };
   }
   
@@ -436,6 +454,31 @@ export async function generateAutoSignal(
     reason = indicatorDirection.reason;
   }
   
+  // ═══ NEW Step 4.1: NO-TRADE SYSTEM ASSESSMENT (Phase 8) ═══
+  // Evaluate all "don't trade" filters: systemic risk, news, liquidity, etc.
+  noTradeAssessment = assessNoTrade({
+    asset,
+    candles,
+    indicators,
+    regimeResult,
+    patternType: bestPattern?.type || null,
+    sessionType: session.session,
+  });
+
+  // If NoTrade system BLOCKS trading, override to NO_OPERAR
+  // Need to determine data collection mode early for this check
+  const earlySampleSize = await db.signal.count({ where: { asset, status: { not: 'PENDING' } } });
+  const earlyIsDataCollectionMode = earlySampleSize < 1000;
+  
+  if (!noTradeAssessment.canTrade) {
+    const blockReason = noTradeAssessment.summary;
+    if (!earlyIsDataCollectionMode) {
+      direction = 'NO_OPERAR';
+      confidence = 0;
+      reason = blockReason;
+    }
+  }
+
   // ═══ Step 4.5: PROVEN EDGE FILTER (Phase 7) ═══
   // THE MOST IMPORTANT FILTER IN THE PIPELINE.
   // Hard allowlist from 6-month backtest: only trade combos with proven positive edge.
@@ -678,6 +721,73 @@ export async function generateAutoSignal(
     confidence = Math.max(0, confidence - 5);
   }
   
+  // ═══ NEW Step 7.5: CONFLUENCE ENGINE ASSESSMENT (Phase 8) ═══
+  // When all NoTrade filters are green, evaluate confluence of multiple factors
+  if (direction !== 'NO_OPERAR' || (isDataCollectionMode && bestPattern)) {
+    confluenceResult = assessConfluence({
+      asset,
+      pattern: bestPattern,
+      indicators,
+      regimeResult,
+      mtfScore,
+      mtfDirection,
+      sessionType: session.session,
+      historicalWinRate,
+      historicalSampleSize: sampleSize,
+      historicalExpectancy: expectancy,
+      edgeClassification: edgeClassification || 'GREY',
+      noTradeAssessment,
+      entryPrice: candles[candles.length - 1].close,
+      atr: indicators.atr14 || candles[candles.length - 1].close * 0.005,
+    });
+
+    // Confluence score overrides simple confidence
+    if (confluenceResult.shouldTrade && confluenceResult.setup) {
+      // Confluence says TRADE — use its direction and confidence
+      direction = confluenceResult.setup.direction;
+      confidence = Math.max(confidence, confluenceResult.confluenceScore * 0.8);
+      reason = confluenceResult.reason;
+
+      // ═══ NEW Step 7.6: TRADE MANAGEMENT PLAN (Phase 8) ═══
+      // Calculate position sizing, dynamic stops, exit alerts
+      try {
+        const account = await getOrCreateAccount();
+        const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
+        const consecutiveLosses = await getConsecutiveLosses();
+
+        tradeManagementPlan = createTradeManagementPlan({
+          setup: confluenceResult.setup,
+          accountBalance: account.balance,
+          atr: indicators.atr14 || candles[candles.length - 1].close * 0.005,
+          regimeResult,
+          noTradeAssessment,
+          consecutiveLosses,
+          openPositions: openPositions.map(p => ({
+            asset: p.asset,
+            direction: p.direction,
+            entryPrice: p.entryPrice,
+            quantity: p.quantity,
+            unrealizedPnl: p.unrealizedPnl || 0,
+          })),
+          timeframe,
+        });
+
+        // Update risk/reward from trade management plan
+        if (tradeManagementPlan.riskRewardRatio > 0) {
+          calculatedRR = tradeManagementPlan.riskRewardRatio;
+        }
+      } catch (err: any) {
+        console.error('Trade management plan failed:', err.message);
+      }
+    } else if (!confluenceResult.shouldTrade && !isDataCollectionMode) {
+      // Confluence says NO TRADE in production mode
+      direction = 'NO_OPERAR';
+      reason = confluenceResult.reason;
+      confidence = Math.min(confidence, confluenceResult.confluenceScore * 0.5);
+    }
+    // In data collection mode, we still generate signals even with low confluence
+  }
+
   // Step 8: Final NO_OPERAR check
   if (isDataCollectionMode) {
     if (direction === 'NO_OPERAR' || (!bestPattern && confidence < 10)) {
@@ -745,7 +855,6 @@ export async function generateAutoSignal(
   const expirationMinutes = timeframe === 'M5' ? 40 : tfMinutes * 2;
   
   // === NEW Step 12.5: Calculate risk/reward from pattern key levels ===
-  let calculatedRR = riskReward;
   if (bestPattern?.keyLevels) {
     const entry = bestPattern.keyLevels.entry;
     const sl = bestPattern.keyLevels.stopLoss;
@@ -894,7 +1003,28 @@ export async function generateAutoSignal(
     provenEdgeTier,
     provenEdgeAllowed,
     provenEdge,
+    // Phase 8: 3-System Architecture fields
+    noTradeAssessment,
+    confluenceResult,
+    tradeManagementPlan,
   };
+}
+
+// === HELPER: GET CONSECUTIVE LOSSES ===
+
+async function getConsecutiveLosses(): Promise<number> {
+  const recentTrades = await db.signal.findMany({
+    where: { status: 'CLOSED', result: { in: ['WIN', 'LOSS'] } },
+    orderBy: { updatedAt: 'desc' },
+    take: 10,
+  });
+
+  let consecutive = 0;
+  for (const t of recentTrades) {
+    if (t.result === 'LOSS') consecutive++;
+    else break;
+  }
+  return consecutive;
 }
 
 // === INDICATOR-BASED DIRECTION (fallback when no pattern detected) ===
@@ -1191,13 +1321,13 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
           const engine = getExecutionEngine(autoExecution.mode);
 
           // Get ATR from indicators
-          const atr = result.indicators?.atr14 || (result.indicators?.close || result.indicators?.sma20 || 0) * 0.005;
+          const atr = result.indicators?.atr14 || (result.indicators?.sma20 || 0) * 0.005;
 
           const execResult = await engine.executeSignal({
             signalId: result.signalId,
             asset: result.asset,
             direction: result.direction as 'HIGHER' | 'LOWER',
-            entryPrice: result.indicators?.close || 0, // Will be overridden by live price
+            entryPrice: result.indicators?.sma20 || 0, // Will be overridden by live price
             confidence: result.confidence,
             patternType: result.pattern,
             sessionType: result.session,
