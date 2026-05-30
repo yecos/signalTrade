@@ -19,3 +19,40 @@ Stage Summary:
 - Strategy manager now defaults to the proven Mean Reversion ETHUSDT 1H edge
 - All 3 files committed and pushed: worker.ts, risk-manager.ts, strategy-manager.ts
 - Funding arb $0.00 backtest issue still pending (low priority since strategy is disabled)
+
+---
+Task ID: 1-6
+Agent: Main Agent
+Task: Disable old auto-trader v7, create AI Market Analyzer, integrate with Mean Reversion, push to GitHub
+
+Work Log:
+- Disabled old pattern-based auto-trader (v7) PERMANENTLY in worker.ts Phase 2
+  - No more runAutoTraderCycle() calls — only cleanup + config sync remains
+  - Forces autoTraderRunning = 'false' in DB every cycle
+- Created src/lib/ai-market-analyzer.ts (new module, ~600 lines)
+  - LLM-based market analysis using z-ai-web-dev-sdk
+  - Calls LLM every 30 min (cached between calls)
+  - Suggests bounded parameter adjustments for Mean Reversion
+  - Walk-forward validation tracks recent trade performance
+  - Risk level determination (LOW/MEDIUM/HIGH/EXTREME)
+  - Position size multiplier based on risk
+  - Market event detection (volume spikes, extreme RSI, etc.)
+- Updated src/lib/mean-reversion.ts
+  - Added AI-adaptive parameters in generateMeanReversionSignal()
+  - AI adjustments override defaults but stay within safe bounds
+  - Added FILTER 0: AI should-trade check before session/regime filters
+  - executeMeanReversionTrade() now accepts aiPositionSizeMultiplier
+  - Records closed trades for walk-forward tracking via recordWalkForwardTrade()
+- Updated scripts/worker.ts
+  - AI Analyzer initialized at startup (both auto and non-auto modes)
+  - AI status logged every cycle (regime, risk, adjustments, events)
+  - New HTTP endpoints: /ai-analysis (cached), /ai-refresh (force LLM call)
+  - Startup message updated to show AI adaptativa
+- Committed as 0b93137 and pushed to origin/main
+
+Stage Summary:
+- Old auto-trader v7 permanently disabled — no more losing pattern signals
+- AI Market Analyzer operational — adapts strategy to market conditions
+- Walk-forward validation tracks if edge remains valid in live trading
+- All parameter adjustments bounded within safe ranges
+- Ready for user to pull and test on their PC
