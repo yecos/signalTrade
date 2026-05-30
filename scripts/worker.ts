@@ -1012,36 +1012,71 @@ async function main(): Promise<void> {
   // Start status server FIRST (keeps process alive)
   await startStatusServer();
 
-  // ═══ CLEANUP: Close stale positions from previous sessions ═══
-  // Positions older than 40 min (expiration time) are definitely stale
+  // ═══ CLEANUP: Close ALL open positions on fresh start ═══
+  // When starting with --auto, any existing OPEN positions are from a previous
+  // worker session that was interrupted. They can't be properly monitored anymore
+  // (their SL/TP/expiry context is stale). Close them all for a clean start.
   try {
-    const stalePositions = await db.position.findMany({ where: { status: 'OPEN' } });
-    const now = Date.now();
-    const STALE_THRESHOLD_MS = 40 * 60 * 1000; // 40 minutes (matches expiration)
-    let staleClosed = 0;
+    const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
 
-    const engine = getExecutionEngine();
-    for (const pos of stalePositions) {
-      const age = now - new Date(pos.openedAt).getTime();
-      if (age > STALE_THRESHOLD_MS) {
-        try {
-          await engine.closePosition(pos.id, `STARTUP CLEANUP: position open ${Math.round(age / 60000)} min (stale from previous session)`);
-          staleClosed++;
-        } catch (err: any) {
-          // Force-close directly in DB if engine fails
-          await db.position.update({
-            where: { id: pos.id },
-            data: { status: 'CLOSED', closedAt: new Date() },
-          });
-          staleClosed++;
+    if (openPositions.length > 0) {
+      log('INFO', `🧹 CLEANUP: Encontradas ${openPositions.length} posiciones abiertas de sesiones anteriores...`);
+
+      if (AUTO_START) {
+        // With --auto: close ALL positions (fresh start)
+        const engine = getExecutionEngine();
+        let closed = 0;
+        for (const pos of openPositions) {
+          try {
+            await engine.closePosition(pos.id, `STARTUP CLEANUP: fresh start (--auto mode)`);
+            closed++;
+          } catch {
+            // Force-close directly in DB if engine fails
+            await db.position.update({
+              where: { id: pos.id },
+              data: { status: 'CLOSED', closedAt: new Date() },
+            });
+            closed++;
+          }
+        }
+        // Also close any associated OPEN trades
+        const openTrades = await db.trade.findMany({ where: { status: 'OPEN' } });
+        for (const trade of openTrades) {
+          try {
+            await db.trade.update({
+              where: { id: trade.id },
+              data: { status: 'CLOSED' },
+            });
+          } catch { /* ignore */ }
+        }
+        log('INFO', `🧹 CLEANUP: ${closed} posiciones cerradas + ${openTrades.length} trades limpiados (sesión limpia)`);
+      } else {
+        // Without --auto: only close positions older than 40 min (safety)
+        const now = Date.now();
+        const STALE_THRESHOLD_MS = 40 * 60 * 1000;
+        let staleClosed = 0;
+        const engine = getExecutionEngine();
+        for (const pos of openPositions) {
+          const age = now - new Date(pos.openedAt).getTime();
+          if (age > STALE_THRESHOLD_MS) {
+            try {
+              await engine.closePosition(pos.id, `STARTUP CLEANUP: position open ${Math.round(age / 60000)} min`);
+              staleClosed++;
+            } catch {
+              await db.position.update({
+                where: { id: pos.id },
+                data: { status: 'CLOSED', closedAt: new Date() },
+              });
+              staleClosed++;
+            }
+          }
+        }
+        if (staleClosed > 0) {
+          log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones huérfanas cerradas (>40 min)`);
+        } else {
+          log('INFO', `📊 ${openPositions.length} posiciones abiertas activas (dentro del expiry)`);
         }
       }
-    }
-
-    if (staleClosed > 0) {
-      log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones huérfanas cerradas (de sesiones anteriores)`);
-    } else if (stalePositions.length > 0) {
-      log('INFO', `📊 ${stalePositions.length} posiciones abiertas activas (dentro del expiry)`);
     }
   } catch (err: any) {
     log('WARN', `Cleanup error: ${err.message}`);
