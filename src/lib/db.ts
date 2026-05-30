@@ -62,6 +62,50 @@ export function getDbMode(): 'turso' | 'local' {
   return process.env.TURSO_DATABASE_URL ? 'turso' : 'local'
 }
 
+// ─── RETRY UTILITY ──────────────────────────────────────────────────────────
+// Turso HTTP connections are flaky — this wraps any async DB operation with
+// exponential-backoff retries so transient "fetch failed" errors don't crash cycles.
+
+export async function withRetry<T>(
+  fn: () => Promise<T>,
+  maxRetries: number = 3,
+  baseDelayMs: number = 1000,
+  label: string = 'DB'
+): Promise<T> {
+  let lastError: any
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn()
+    } catch (err: any) {
+      lastError = err
+      const msg = err?.message || String(err)
+
+      // Don't retry on schema/argument errors — only retry on transient failures
+      const isTransient =
+        msg.includes('fetch failed') ||
+        msg.includes('ECONNRESET') ||
+        msg.includes('ETIMEDOUT') ||
+        msg.includes('socket hang up') ||
+        msg.includes('network') ||
+        msg.includes('Connection refused') ||
+        msg.includes('503') ||
+        msg.includes('502') ||
+        msg.includes('500') ||
+        msg.includes('rate limit') ||
+        msg.includes('too many connections')
+
+      if (!isTransient || attempt === maxRetries) {
+        break
+      }
+
+      const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 500
+      console.log(`[DB-RETRY] ${label} attempt ${attempt}/${maxRetries} failed: ${msg}. Retrying in ${Math.round(delay)}ms...`)
+      await new Promise(resolve => setTimeout(resolve, delay))
+    }
+  }
+  throw lastError
+}
+
 // Test database connectivity
 export async function testConnection(): Promise<{
   ok: boolean
@@ -73,7 +117,7 @@ export async function testConnection(): Promise<{
   const start = Date.now()
   try {
     const mode = getDbMode()
-    const signalCount = await db.signal.count()
+    const signalCount = await withRetry(() => db.signal.count(), 2, 500, 'testConnection')
     const latency = Date.now() - start
     return { ok: true, mode, signalCount, latency }
   } catch (err) {
@@ -112,7 +156,10 @@ export async function runAutoMigration(): Promise<{ applied: string[]; skipped: 
   // First, check which columns already exist
   let existingColumns: Set<string> = new Set()
   try {
-    const result = await db.$queryRaw<Array<{ name: string }>>`PRAGMA table_info(Signal)`
+    const result = await withRetry(
+      () => db.$queryRaw<Array<{ name: string }>>`PRAGMA table_info(Signal)`,
+      2, 500, 'PRAGMA'
+    )
     existingColumns = new Set(result.map(r => r.name))
   } catch (err) {
     // If PRAGMA fails (e.g., Turso HTTP doesn't support PRAGMA), try a different approach
@@ -127,7 +174,10 @@ export async function runAutoMigration(): Promise<{ applied: string[]; skipped: 
     }
 
     try {
-      await db.$executeRawUnsafe(migration.sql)
+      await withRetry(
+        () => db.$executeRawUnsafe(migration.sql),
+        2, 500, `migrate-${migration.column}`
+      )
       applied.push(migration.column)
       console.log(`[DB-MIGRATE] ✅ Added column: ${migration.column}`)
     } catch (err: any) {
@@ -250,7 +300,10 @@ const TABLE_CREATION_SQL = [
 async function runTableMigrations(): Promise<void> {
   for (const sql of TABLE_CREATION_SQL) {
     try {
-      await db.$executeRawUnsafe(sql)
+      await withRetry(
+        () => db.$executeRawUnsafe(sql),
+        2, 500, 'table-migration'
+      )
       const tableName = sql.match(/CREATE TABLE IF NOT EXISTS (\w+)/)?.[1] || 'unknown'
       console.log(`[DB-MIGRATE] ✅ Table ensured: ${tableName}`)
     } catch (err: any) {

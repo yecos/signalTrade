@@ -9,7 +9,7 @@
 //     3. TRADE MANAGER: Sizing automático ATR, gestión dinámica, alertas de cierre
 //     Previous systems (Proven Edge, Edge Profile, Bayesian) are still used as inputs.
 
-import { db } from './db';
+import { db, withRetry } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
 import { getCandles as getDBCandles, generateNextCandle, ASSET_CONFIGS, generateHistoricalCandles } from './market-data';
 import { computeAllIndicators, type IndicatorSnapshot } from './indicators';
@@ -135,24 +135,30 @@ export async function calculateSetupScore(
   indicators: IndicatorSnapshot
 ): Promise<{ score: number; sampleSize: number; historicalWinRate: number }> {
   // Query SetupStats for this combination
-  const exactMatch = await db.setupStats.findUnique({
-    where: {
-      patternType_asset_session_timeframe: {
-        patternType: patternType || 'none',
-        asset,
-        session,
-        timeframe: 'M5',
+  const exactMatch = await withRetry(
+    () => db.setupStats.findUnique({
+      where: {
+        patternType_asset_session_timeframe: {
+          patternType: patternType || 'none',
+          asset,
+          session,
+          timeframe: 'M5',
+        },
       },
-    },
-  });
+    }),
+    2, 500, 'setupScore-exact'
+  );
   
   // Query broader stats (pattern + session, any asset)
-  const broaderMatch = await db.setupStats.findMany({
-    where: {
-      patternType: patternType || 'none',
-      session,
-    },
-  });
+  const broaderMatch = await withRetry(
+    () => db.setupStats.findMany({
+      where: {
+        patternType: patternType || 'none',
+        session,
+      },
+    }),
+    2, 500, 'setupScore-broader'
+  );
   
   const broaderStats = broaderMatch.reduce(
     (acc, s) => ({
@@ -485,7 +491,10 @@ export async function generateAutoSignal(
   // BLOCKED patterns (breakout, trend_continuation, none) → NEVER trade.
   // In data collection mode: allow unproven combos with positive pattern WR to build dataset.
   // Determine sample size for strict mode decision
-  const currentSampleSize = await db.signal.count({ where: { asset, status: { not: 'PENDING' } } });
+  const currentSampleSize = await withRetry(
+    () => db.signal.count({ where: { asset, status: { not: 'PENDING' } } }),
+    2, 500, 'provenEdge-sampleSize'
+  );
   const currentIsDataCollectionMode = currentSampleSize < 1000;
   const currentStrictMode = !currentIsDataCollectionMode; // strict only when we have enough data
   const provenEdgeResult = checkProvenEdge(
@@ -961,7 +970,136 @@ export async function generateAutoSignal(
     edgeClassification: edgeClassification || null,
   };
   
-  const signal = await db.signal.create({ data: signalData });
+  // ─── 3-LEVEL FALLBACK for signal creation ───
+  // Turso "fetch failed" or "Unknown argument" errors are common.
+  // We try 3 levels: full data → base+fullAnalysisJson → minimum fields.
+  let signal: any;
+  
+  try {
+    // Level 1: Try full signal data with all columns (including provenEdgeTier etc.)
+    signal = await withRetry(
+      () => db.signal.create({ data: signalData }),
+      2, 500, 'signal-create-full'
+    );
+  } catch (err1: any) {
+    const msg1 = err1?.message || String(err1);
+    console.error(`[AUTO-TRADER] Signal create Level 1 failed: ${msg1}`);
+    
+    // Level 2: Try with base fields + fullAnalysisJson backup (skip columns that might not exist)
+    try {
+      const baseSignalData = {
+        asset,
+        timeframe,
+        direction,
+        entryPrice,
+        entryTime: now,
+        expirationMinutes,
+        expirationTime: new Date(now.getTime() + expirationMinutes * 60 * 1000),
+        confidence,
+        aiReason: reason,
+        patternType: bestPattern?.type || null,
+        sessionType: session.session,
+        setupScore,
+        source: 'AUTO',
+        status: isNoOperar ? 'CLOSED' : 'PENDING',
+        result: isNoOperar ? 'NO_OPERAR' : null,
+        analysisMode,
+        dataAvailability: JSON.stringify(dataAvailability),
+        statisticalReliability,
+        historicalSampleSize: sampleSize,
+        indicatorsJson: JSON.stringify(indicators),
+        technicalJson: JSON.stringify({
+          trend: indicators.trend,
+          momentum: indicators.momentum,
+          volatilityLevel: indicators.volatilityLevel,
+        }),
+        patternsJson: JSON.stringify(patterns.map(p => ({
+          type: p.type,
+          direction: p.direction,
+          confidence: p.confidence,
+          description: p.description,
+        }))),
+        volumeJson: JSON.stringify(indicators.volumeAnalysis),
+        noOperarReason: direction === 'NO_OPERAR' ? reason : null,
+        verificationMethod: 'SIMULATED',
+        // Phase 4 fields (base ones that definitely exist in schema)
+        marketRegime: regimeResult.regime,
+        featuresJson: JSON.stringify(features),
+        expectancy,
+        riskReward: calculatedRR,
+        adjustedWinRate: adjustedWR,
+        qualityScore: qualityResult.score,
+        qualityFlags: JSON.stringify(qualityResult.flags),
+        // Store MTF + Proven Edge data in fullAnalysisJson as backup
+        fullAnalysisJson: JSON.stringify({
+          mtfConfluence: mtfScore,
+          mtfDirection,
+          h1Filter,
+          h4Filter,
+          entryQuality,
+          provenEdgeTier: provenEdgeTier || null,
+          provenEdgeAllowed: provenEdgeAllowed ?? null,
+          edgeClassification: edgeClassification || null,
+          confluenceResult: confluenceResult ? {
+            confluenceScore: confluenceResult.confluenceScore,
+            shouldTrade: confluenceResult.shouldTrade,
+            reason: confluenceResult.reason,
+          } : null,
+          noTradeAssessment: noTradeAssessment ? {
+            overallScore: noTradeAssessment.overallScore,
+            canTrade: noTradeAssessment.canTrade,
+            tradeQuality: noTradeAssessment.tradeQuality,
+          } : null,
+          pValue,
+          sampleVariance,
+          confidenceInterval,
+        }),
+      };
+      
+      signal = await withRetry(
+        () => db.signal.create({ data: baseSignalData }),
+        2, 500, 'signal-create-base'
+      );
+      console.log('[AUTO-TRADER] ✅ Signal saved with Level 2 (base + fullAnalysisJson)');
+    } catch (err2: any) {
+      const msg2 = err2?.message || String(err2);
+      console.error(`[AUTO-TRADER] Signal create Level 2 failed: ${msg2}`);
+      
+      // Level 3: Absolute minimum fields — this MUST work
+      try {
+        const minimumSignalData = {
+          asset,
+          timeframe,
+          direction,
+          entryPrice,
+          entryTime: now,
+          expirationMinutes,
+          expirationTime: new Date(now.getTime() + expirationMinutes * 60 * 1000),
+          confidence,
+          aiReason: reason,
+          patternType: bestPattern?.type || null,
+          sessionType: session.session,
+          setupScore,
+          source: 'AUTO',
+          status: isNoOperar ? 'CLOSED' : 'PENDING',
+          result: isNoOperar ? 'NO_OPERAR' : null,
+          analysisMode,
+          verificationMethod: 'SIMULATED',
+        };
+        
+        signal = await withRetry(
+          () => db.signal.create({ data: minimumSignalData }),
+          2, 500, 'signal-create-minimum'
+        );
+        console.log('[AUTO-TRADER] ✅ Signal saved with Level 3 (minimum fields only)');
+      } catch (err3: any) {
+        const msg3 = err3?.message || String(err3);
+        console.error(`[AUTO-TRADER] ❌ Signal create Level 3 (minimum) ALSO failed: ${msg3}`);
+        // Return the result anyway without a signal ID — the pipeline completed but DB save failed
+        signal = { id: `failed-${Date.now()}` };
+      }
+    }
+  }
   
   return {
     signalId: signal.id,

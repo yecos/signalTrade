@@ -13,7 +13,7 @@ config({ path: '../.env' });
 config({ path: '.env' });
 
 // ─── Imports from project libs ──────────────────────────────────────────────
-import { db, runAutoMigration } from '../src/lib/db';
+import { db, runAutoMigration, withRetry } from '../src/lib/db';
 import { evaluateSignal, checkAlerts } from '../src/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus, getCandles as getEngineCandles } from '../src/lib/market-engine';
 import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSignal } from '../src/lib/auto-trader';
@@ -83,12 +83,15 @@ function log(level: 'INFO' | 'WARN' | 'ERROR' | 'CYCLE', message: string) {
 // ─── Phase 1: Verify expired pending signals with REAL prices ───────────────
 async function verifyPendingSignals(): Promise<{ closed: number; verified: number; unverifiable: number }> {
   const now = new Date();
-  const expiredSignals = await db.signal.findMany({
-    where: {
-      status: 'PENDING',
-      expirationTime: { lte: now },
-    },
-  });
+  const expiredSignals = await withRetry(
+    () => db.signal.findMany({
+      where: {
+        status: 'PENDING',
+        expirationTime: { lte: now },
+      },
+    }),
+    3, 1000, 'verifyPending-findMany'
+  );
 
   let closed = 0;
   let verified = 0;
@@ -114,10 +117,13 @@ async function verifyPendingSignals(): Promise<{ closed: number; verified: numbe
           priceSource = 'DB_CANDLES';
         } else {
           // 3. Mark as unverifiable — NO random guessing
-          await db.signal.update({
-            where: { id: signal.id },
-            data: { status: 'CLOSED', result: 'DRAW', verificationMethod: 'UNVERIFIABLE' },
-          });
+          await withRetry(
+            () => db.signal.update({
+              where: { id: signal.id },
+              data: { status: 'CLOSED', result: 'DRAW', verificationMethod: 'UNVERIFIABLE' },
+            }),
+            2, 500, 'verify-unverifiable'
+          );
           unverifiable++;
           closed++;
           continue;
@@ -142,13 +148,16 @@ async function verifyPendingSignals(): Promise<{ closed: number; verified: numbe
         estimatedLoss = estimatedLoss || Math.abs(priceDifference);
       }
 
-      await db.signal.update({
-        where: { id: signal.id },
-        data: {
-          exitPrice, result, priceDifference, estimatedProfit, estimatedLoss,
-          status: 'CLOSED', verificationMethod: priceSource,
-        },
-      });
+      await withRetry(
+        () => db.signal.update({
+          where: { id: signal.id },
+          data: {
+            exitPrice, result, priceDifference, estimatedProfit, estimatedLoss,
+            status: 'CLOSED', verificationMethod: priceSource,
+          },
+        }),
+        2, 500, 'verify-update'
+      );
 
       // Update setup stats for AUTO signals
       if (signal.source === 'AUTO' && result !== 'DRAW') {
@@ -204,24 +213,33 @@ async function verifyPendingSignals(): Promise<{ closed: number; verified: numbe
 // ─── Phase 2: Run auto-trader cycle ─────────────────────────────────────────
 async function runAutoTrader(): Promise<{ generated: number; skipped: number; errors: string[] }> {
   // Check if auto-trader is enabled in DB settings
-  const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
+  const runningSetting = await withRetry(
+    () => db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } }),
+    3, 1000, 'autoTrader-running'
+  );
   state.autoTraderEnabled = runningSetting?.value === 'true';
 
   if (!state.autoTraderEnabled) {
     return { generated: 0, skipped: 0, errors: ['Auto-Trader desactivado'] };
   }
 
-  const configSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderConfig' } });
+  const configSetting = await withRetry(
+    () => db.appSettings.findUnique({ where: { key: 'autoTraderConfig' } }),
+    3, 1000, 'autoTrader-config'
+  );
   const config = configSetting ? JSON.parse(configSetting.value) : DEFAULT_CONFIG;
 
   const result = await runAutoTraderCycle(config);
 
   // Update last check time
-  await db.appSettings.upsert({
-    where: { key: 'autoTraderLastCheck' },
-    create: { key: 'autoTraderLastCheck', value: new Date().toISOString() },
-    update: { value: new Date().toISOString() },
-  });
+  await withRetry(
+    () => db.appSettings.upsert({
+      where: { key: 'autoTraderLastCheck' },
+      create: { key: 'autoTraderLastCheck', value: new Date().toISOString() },
+      update: { value: new Date().toISOString() },
+    }),
+    2, 500, 'autoTrader-lastCheck'
+  );
 
   return { generated: result.signalsGenerated, skipped: result.signalsSkipped, errors: result.errors };
 }
@@ -714,7 +732,7 @@ async function main(): Promise<void> {
   } catch (err: any) {
     // testConnection might not exist, try a simple query
     try {
-      await db.signal.count();
+      await withRetry(() => db.signal.count(), 2, 500, 'startup-count');
       log('INFO', '✅ Turso DB conectado (count test)');
     } catch {
       log('ERROR', `No se pudo conectar a Turso DB: ${err.message}`);
