@@ -356,10 +356,23 @@ async function callLLMForAnalysis(context: string): Promise<AIResponse> {
     console.log(`[AI-ANALYZER] LLM Analysis: Regime=${parsed.regime}, Confidence=${parsed.regimeConfidence}, ShouldTrade=${parsed.shouldTrade}`);
     return parsed;
   } catch (err: any) {
-    console.error(`[AI-ANALYZER] LLM call failed: ${err.message}`);
+    const msg = err?.message || ''
+    if (msg.includes('.z-ai-config') || msg.includes('Configuration file')) {
+      // LLM SDK not configured on this machine — log once, then suppress future warnings
+      if (!callLLMForAnalysis._warnedNoConfig) {
+        console.warn('[AI-ANALYZER] LLM no disponible (z-ai-web-dev-sdk no configurado). Usando parámetros backtest-proven.');
+        console.warn('[AI-ANALYZER] Para habilitar IA: crear archivo .z-ai-config en el proyecto o home directory');
+        callLLMForAnalysis._warnedNoConfig = true
+      }
+    } else {
+      console.warn(`[AI-ANALYZER] LLM call failed: ${msg}`);
+    }
     return {};
   }
 }
+
+// Track whether we've warned about missing config (avoid spamming every 30 min)
+namespace callLLMForAnalysis { export var _warnedNoConfig = false }
 
 // === PARSE AI ADJUSTMENTS WITH BOUND ENFORCEMENT ===
 

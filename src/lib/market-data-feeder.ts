@@ -77,12 +77,14 @@ const MACRO_CACHE_TTL_MS = 300_000;
 
 const BINANCE_ENDPOINTS = [
   'https://data-api.binance.vision/api/v3',
-  'https://api.binance.us/api/v3',
   'https://api1.binance.com/api/v3',
   'https://api2.binance.com/api/v3',
-  'https://api3.binance.com/api/v3',
   'https://api.binance.com/api/v3',  // Direct endpoint — sometimes works when others don't
 ];
+
+// Remember which endpoint worked last time — skip failing ones
+let workingBinanceEndpoint: string | null = null;
+const BINANCE_TIMEOUT_MS = 5000; // 5s — fail fast, try next endpoint
 
 const BINANCE_SYMBOLS: Record<string, string> = {
   'BTC/USD': 'BTCUSDT',
@@ -103,65 +105,79 @@ interface BinanceKline {
 }
 
 async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 200): Promise<BinanceKline[]> {
-  // Try each endpoint with 2 attempts per endpoint for resilience
-  for (const baseUrl of BINANCE_ENDPOINTS) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
-      try {
-        const url = `${baseUrl}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
-        const res = await fetch(url, {
-          signal: AbortSignal.timeout(12000),
-          headers: { Accept: 'application/json' },
-        });
-        if (!res.ok) break; // Don't retry same endpoint on HTTP errors
-        const data = await res.json();
-        if (!Array.isArray(data) || data.length === 0) break;
+  // Try working endpoint first, then others — fail fast (5s timeout)
+  const endpoints = workingBinanceEndpoint
+    ? [workingBinanceEndpoint, ...BINANCE_ENDPOINTS.filter(e => e !== workingBinanceEndpoint)]
+    : BINANCE_ENDPOINTS;
 
-        return data.map((k: any[]) => ({
-          timestamp: Number(k[0]),
-          open: parseFloat(String(k[1])),
-          high: parseFloat(String(k[2])),
-          low: parseFloat(String(k[3])),
-          close: parseFloat(String(k[4])),
-          volume: parseFloat(String(k[5])),
-        }));
-      } catch {
-        if (attempt === 1) await delay(500); // Brief pause before retrying same endpoint
-        continue;
-      }
-    }
+  for (const baseUrl of endpoints) {
+    try {
+      const url = `${baseUrl}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      workingBinanceEndpoint = baseUrl; // Remember working endpoint
+      return data.map((k: any[]) => ({
+        timestamp: Number(k[0]),
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
+      }));
+    } catch { continue; }
   }
   return [];
 }
 
 async function fetchBinancePrice(symbol: string): Promise<number | null> {
-  for (const baseUrl of BINANCE_ENDPOINTS) {
+  const endpoints = workingBinanceEndpoint
+    ? [workingBinanceEndpoint, ...BINANCE_ENDPOINTS.filter(e => e !== workingBinanceEndpoint)]
+    : BINANCE_ENDPOINTS;
+
+  for (const baseUrl of endpoints) {
     try {
       const url = `${baseUrl}/ticker/price?symbol=${symbol}`;
       const res = await fetch(url, {
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) continue;
       const data = await res.json();
-      if (data.price) return parseFloat(data.price);
+      if (data.price) {
+        workingBinanceEndpoint = baseUrl;
+        return parseFloat(data.price);
+      }
     } catch { continue; }
   }
   return null;
 }
 
 async function fetchBinanceBookTicker(symbol: string): Promise<{ bid: number; ask: number; spread: number } | null> {
-  for (const baseUrl of BINANCE_ENDPOINTS) {
+  const endpoints = workingBinanceEndpoint
+    ? [workingBinanceEndpoint, ...BINANCE_ENDPOINTS.filter(e => e !== workingBinanceEndpoint)]
+    : BINANCE_ENDPOINTS;
+
+  for (const baseUrl of endpoints) {
     try {
       const url = `${baseUrl}/ticker/bookTicker?symbol=${symbol}`;
       const res = await fetch(url, {
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) continue;
       const data = await res.json();
       const bid = parseFloat(data.bidPrice);
       const ask = parseFloat(data.askPrice);
-      if (bid > 0 && ask > 0) return { bid, ask, spread: ask - bid };
+      if (bid > 0 && ask > 0) {
+        workingBinanceEndpoint = baseUrl;
+        return { bid, ask, spread: ask - bid };
+      }
     } catch { continue; }
   }
   return null;
@@ -171,15 +187,20 @@ async function fetchBinance24hTicker(symbol: string): Promise<{
   lastPrice: number; volume: number; priceChangePercent: number;
   bidPrice: number; askPrice: number;
 } | null> {
-  for (const baseUrl of BINANCE_ENDPOINTS) {
+  const endpoints = workingBinanceEndpoint
+    ? [workingBinanceEndpoint, ...BINANCE_ENDPOINTS.filter(e => e !== workingBinanceEndpoint)]
+    : BINANCE_ENDPOINTS;
+
+  for (const baseUrl of endpoints) {
     try {
       const url = `${baseUrl}/ticker/24hr?symbol=${symbol}`;
       const res = await fetch(url, {
-        signal: AbortSignal.timeout(10000),
+        signal: AbortSignal.timeout(BINANCE_TIMEOUT_MS),
         headers: { Accept: 'application/json' },
       });
       if (!res.ok) continue;
       const data = await res.json();
+      workingBinanceEndpoint = baseUrl;
       return {
         lastPrice: parseFloat(data.lastPrice),
         volume: parseFloat(data.volume),
