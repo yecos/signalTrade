@@ -56,3 +56,21 @@ Stage Summary:
 - Walk-forward validation tracks if edge remains valid in live trading
 - All parameter adjustments bounded within safe ranges
 - Ready for user to pull and test on their PC
+---
+Task ID: fix-security-endpoints
+Agent: main
+Task: Fix security issues found during code review - protect /activate, fix comments, fix MR default
+
+Work Log:
+- Reviewed full codebase via Explore agent - found 3 minor issues
+- Protected /activate endpoint: no longer sets autoTraderEnabled=true or autoTraderRunning='true' in DB. Only enables auto-execution PAPER for Strategy Manager.
+- Protected /optimal-config endpoint: same protection applied
+- Updated /health endpoint: now shows autoTraderV7:false and strategyManager:true instead of confusing 'autoTrader' field
+- Fixed misleading comment in strategy-manager.ts line 8: "V7 es fallback" → "V7 PERMANENTLY DISABLED"
+- Changed DEFAULT_MEAN_REVERSION_CONFIG.enabled from false to true (matches actual usage)
+
+Stage Summary:
+- Commit 4c4c42a pushed to GitHub
+- All 3 issues resolved
+- Worker confirmed running correctly from user's output
+- Auto-trader V7 is now protected at ALL entry points (cycle override, /activate, /optimal-config)
