@@ -449,16 +449,17 @@ export class BybitClient {
   }
 
   // Get Open Interest
-  // Bybit V5 API: /v5/market/open-interest accepts category, symbol, interval, limit
-  // interval values: '5m', '15m', '30m', '1h', '4h', '1d'
-  async getOpenInterest(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h', limit: number = 30): Promise<Array<{
+  // Bybit V5 API: /v5/market/open-interest
+  // NOTE: Bybit renamed 'interval' to 'intervalTime' in 2025 API update
+  // intervalTime values: '5m', '15m', '30m', '1h', '4h', '1d'
+  async getOpenInterest(symbol: string, intervalTime: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h', limit: number = 30): Promise<Array<{
     timestamp: string;
     openInterest: number;
   }>> {
     const result = await this.request('GET', '/v5/market/open-interest', {
       category: 'linear',
       symbol,
-      interval,
+      intervalTime,
       limit: limit.toString(),
     });
     if (!result.success || !result.result?.list) return [];
