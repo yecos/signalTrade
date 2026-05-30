@@ -167,13 +167,14 @@ export class BybitClient {
 
     // ═══ Retry logic with timeout ═══
     const MAX_RETRIES = 2; // Reduced from 3 — fail fast on persistent errors
-    const TIMEOUT_MS = 8000; // 8 second timeout (was 15s — too slow for cycles)
+    const TIMEOUT_MS = 10000; // 10 second timeout — balance between reliability and speed
     const isTransientError = (err: any) => {
       const msg = (err.message || '').toLowerCase();
       return msg.includes('fetch failed') || msg.includes('econnreset') ||
              msg.includes('etimedout') || msg.includes('abort') ||
              msg.includes('network') || msg.includes('socket hang up') ||
-             msg.includes('enotfound') || msg.includes('connrefused');
+             msg.includes('enotfound') || msg.includes('connrefused') ||
+             msg.includes('timeout');
     };
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {

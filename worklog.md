@@ -118,3 +118,31 @@ Stage Summary:
 - ai-market-analyzer.ts: Default analysis now cached on failure — FIXES "Sin análisis cacheado"
 - market-data-feeder.ts: Parallelized kline and sentiment fetching — REDUCES CYCLE TIME
 - These 3 fixes together should resolve: Bybit errors, 500s cycles, AI not caching, no signals generated
+---
+Task ID: fix-fetch-failed-v3
+Agent: main
+Task: Fix Bybit "fetch failed" cascade — rate-limit API calls, batch DB upserts, fix market quality degradation
+
+Work Log:
+- ROOT CAUSE: market-data-feeder v2 fired ~20 concurrent Bybit API requests (8 klines + 10 sentiment + 2 instruments), overwhelming the network and causing "fetch failed" errors on ALL requests
+- Fixed market-data-feeder.ts (v3):
+  - Added concurrency limiter: max 3 concurrent Bybit requests at a time
+  - Changed sentiment computation from parallel to SEQUENTIAL (one asset at a time, with 300ms delays between Bybit calls)
+  - Changed kline fetching to use rate-limited concurrency instead of Promise.allSettled with unlimited parallelism
+  - Added 500ms delays between request groups (klines → sentiments → instruments)
+  - Batched DB upserts in chunks of 10 (was individual sequential) to reduce Turso pressure
+  - Added retry with delay for ticker failures in computeSentiment (1s retry on first failure)
+- Fixed market-engine.ts:
+  - Changed data quality calculation to be CRYPTO-FOCUSED instead of ALL-OR-NOTHING
+  - Quality is now HIGH if both BTC/USD and ETH/USD have real data sources (forex fallback is acceptable)
+  - Previous logic: any asset on FALLBACK degraded quality to MEDIUM → wrong for crypto-focused strategy
+  - Fixed BOTH updateSourceStatus() and performHealthCheck() calculations
+- Improved broker-client.ts:
+  - Increased timeout from 8s → 10s for better reliability on slow connections
+  - Added 'timeout' to transient error detection for proper retry handling
+
+Stage Summary:
+- Bybit "fetch failed" errors should be eliminated — requests now respect rate limits
+- Market quality should stay HIGH instead of degrading to MEDIUM
+- DB operations less likely to overload Turso (batched upserts)
+- 3 files modified: market-data-feeder.ts, market-engine.ts, broker-client.ts

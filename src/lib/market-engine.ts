@@ -375,10 +375,21 @@ function updateSourceStatus(asset: string, source: 'COINGECKO' | 'BINANCE' | 'TW
     state.status.connected = true;
   }
 
-  // Recalculate data quality
+  // Recalculate data quality — based on CRYPTO assets primarily
+  // Forex (EUR/USD, GBP/USD, USD/JPY) often fallback to GBM which is expected.
+  // As long as crypto (BTC/USD, ETH/USD) have real sources, quality is HIGH.
   const sources = Object.values(state.status.sources);
-  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER')) {
-    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER') ? 'HIGH' : 'MEDIUM';
+  const cryptoAssets = ['BTC/USD', 'ETH/USD'];
+  const cryptoSources = cryptoAssets.map(a => state.status.sources[a]).filter(Boolean);
+  const cryptoAllReal = cryptoSources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA');
+  const cryptoSomeReal = cryptoSources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA');
+
+  if (cryptoAllReal && cryptoSources.length >= 2) {
+    // All crypto has real data → HIGH (forex fallback is acceptable)
+    state.status.dataQuality = 'HIGH';
+  } else if (cryptoSomeReal) {
+    // Some crypto has real data → MEDIUM
+    state.status.dataQuality = 'MEDIUM';
   } else if (sources.some(s => s === 'FALLBACK')) {
     state.status.dataQuality = 'LOW';
   } else {
@@ -548,12 +559,21 @@ async function performHealthCheck(): Promise<void> {
     }
   }
 
-  // Recalculate data quality
+  // Recalculate data quality — based on CRYPTO assets primarily
   const sources = Object.values(state.status.sources);
-  if (sources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER')) {
-    state.status.dataQuality = sources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA' || s === 'FRANKFURTER') ? 'HIGH' : 'MEDIUM';
-  } else {
+  const cryptoAssets = ['BTC/USD', 'ETH/USD'];
+  const cryptoSources = cryptoAssets.map(a => state.status.sources[a]).filter(Boolean);
+  const cryptoAllReal = cryptoSources.every(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA');
+  const cryptoSomeReal = cryptoSources.some(s => s === 'COINGECKO' || s === 'BINANCE' || s === 'TWELVEDATA');
+
+  if (cryptoAllReal && cryptoSources.length >= 2) {
+    state.status.dataQuality = 'HIGH';
+  } else if (cryptoSomeReal) {
+    state.status.dataQuality = 'MEDIUM';
+  } else if (sources.some(s => s === 'FALLBACK')) {
     state.status.dataQuality = 'LOW';
+  } else {
+    state.status.dataQuality = 'OFFLINE';
   }
 }
 
