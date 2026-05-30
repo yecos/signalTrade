@@ -643,6 +643,46 @@ async function runCycle(): Promise<void> {
     // Non-critical, don't count as error
   }
 
+  // ═══ Phase 6: NEW STRATEGY ENGINE (v8) ═══
+  // Funding Arb + Grid Trading + Mean Reversion + Order Flow
+  try {
+    log('CYCLE', 'Fase 6: Strategy Manager (nuevas estrategias)...');
+    const { executeStrategyCycle, getStrategyManagerConfig } = await import('../src/lib/strategy-manager');
+    const strategyConfig = getStrategyManagerConfig();
+
+    if (strategyConfig.enabled) {
+      const strategyResult = await executeStrategyCycle();
+
+      // Log strategy results
+      if (strategyResult.fundingArb.executed) {
+        log('CYCLE', `  → Funding Arb: ${strategyResult.fundingArb.opportunities.length} oportunidades, ${strategyResult.fundingArb.positionsOpened} abiertas, $${strategyResult.fundingArb.totalFundingCollected.toFixed(2)} cobrado`);
+      }
+      if (strategyResult.gridTrading.executed) {
+        log('CYCLE', `  → Grid Trading: ${strategyResult.gridTrading.gridsActive} grids activos, ${strategyResult.gridTrading.fillsProcessed} fills, $${strategyResult.gridTrading.totalPnl.toFixed(2)} P&L`);
+      }
+      if (strategyResult.meanReversion.executed) {
+        log('CYCLE', `  → Mean Reversion: ${strategyResult.meanReversion.signalsGenerated} señales, ${strategyResult.meanReversion.tradesOpened} trades, $${strategyResult.meanReversion.totalPnl.toFixed(2)} P&L`);
+      }
+      if (strategyResult.orderFlow.executed) {
+        log('CYCLE', `  → Order Flow: ${strategyResult.orderFlow.snapshotsTaken} snapshots, ${strategyResult.orderFlow.actionableSignals} señales accionables`);
+      }
+
+      // Log recommendations
+      for (const rec of strategyResult.strategyRecommendations) {
+        log('INFO', `  💡 ${rec}`);
+      }
+
+      if (strategyResult.circuitBreakerTriggered) {
+        log('ERROR', '🚨 CIRCUIT BREAKER ACTIVADO — Todas las estrategias detenidas');
+      }
+    } else {
+      log('CYCLE', `  → Strategy Manager deshabilitado. Activar con /set-strategy-config`);
+    }
+  } catch (err: any) {
+    log('WARN', `Fase 6: Strategy Manager error — ${err.message}`);
+    // Non-critical, don't count as error — strategies are new and may have issues
+  }
+
   const duration = Date.now() - startTime;
   state.totalCycles++;
   state.totalErrors += errors;
@@ -826,21 +866,17 @@ function startStatusServer(): Promise<void> {
           
           for (const pos of openPositions) {
             try {
-              // Try engine close first (updates trades, signals, account properly)
               const engine = getExecutionEngine();
               await engine.closePosition(pos.id, `FORCE CLOSE via /force-close-all`);
               closed++;
             } catch {
-              // Engine close failed — force-close directly in DB
               try {
-                // Close linked trade first
                 if (pos.tradeId) {
                   await db.trade.update({
                     where: { id: pos.tradeId },
                     data: { status: 'CLOSED', exitPrice: pos.currentPrice || pos.entryPrice, closedAt: new Date() },
                   });
                 }
-                // Close linked signal
                 const trade = pos.tradeId ? await db.trade.findUnique({ where: { id: pos.tradeId } }) : null;
                 if (trade?.signalId) {
                   await db.signal.update({
@@ -848,7 +884,6 @@ function startStatusServer(): Promise<void> {
                     data: { status: 'CLOSED', verificationMethod: 'FORCE_CLOSE_ALL' },
                   });
                 }
-                // Close position
                 await db.position.update({
                   where: { id: pos.id },
                   data: { status: 'CLOSED', closedAt: new Date() },
@@ -860,11 +895,8 @@ function startStatusServer(): Promise<void> {
             }
           }
           
-          // Verify cleanup
           const remainingOpen = await db.position.count({ where: { status: 'OPEN' } });
           if (remainingOpen > 0) {
-            log('WARN', `  ⚠️ ${remainingOpen} positions still OPEN after cleanup — retrying...`);
-            // Nuclear option: bulk update
             await db.position.updateMany({
               where: { status: 'OPEN' },
               data: { status: 'CLOSED', closedAt: new Date() },
@@ -881,6 +913,133 @@ function startStatusServer(): Promise<void> {
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
+      // ═══ NEW STRATEGY ENDPOINTS (v8) ═══
+
+      // Get strategy dashboard
+      if (url.pathname === '/strategies') {
+        try {
+          const { getStrategyDashboard } = await import('../src/lib/strategy-manager');
+          const dashboard = getStrategyDashboard();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(dashboard, null, 2));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Set strategy config (POST)
+      if (url.pathname === '/set-strategy-config' && req.method === 'POST') {
+        let body = '';
+        req.on('data', chunk => { body += chunk; });
+        req.on('end', async () => {
+          try {
+            const config = JSON.parse(body);
+            const { saveStrategyManagerConfig } = await import('../src/lib/strategy-manager');
+            await saveStrategyManagerConfig(config);
+            log('INFO', `⚙️ Strategy config actualizada: ${JSON.stringify(config)}`);
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: true, config }));
+          } catch (err: any) {
+            res.writeHead(400, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, error: err.message }));
+          }
+        });
+        return;
+      }
+
+      // Apply strategy preset
+      if (url.pathname === '/strategy-preset') {
+        const preset = url.searchParams.get('preset') as 'CONSERVATIVE' | 'MODERATE' | 'AGGRESSIVE' | 'DRY_RUN' | null;
+        if (!preset || !['CONSERVATIVE', 'MODERATE', 'AGGRESSIVE', 'DRY_RUN'].includes(preset)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid preset. Use: CONSERVATIVE, MODERATE, AGGRESSIVE, DRY_RUN' }));
+          return;
+        }
+        try {
+          const { applyPreset } = await import('../src/lib/strategy-manager');
+          await applyPreset(preset);
+          log('INFO', `🎯 Strategy preset aplicado: ${preset}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, preset, message: `Preset ${preset} aplicado` }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
+      // Enable/disable individual strategy
+      if (url.pathname === '/toggle-strategy') {
+        const strategy = url.searchParams.get('strategy') as 'fundingArb' | 'gridTrading' | 'meanReversion' | 'orderFlow' | null;
+        const action = url.searchParams.get('action') as 'enable' | 'disable' | null;
+        if (!strategy || !action || !['fundingArb', 'gridTrading', 'meanReversion', 'orderFlow'].includes(strategy)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: 'Invalid params. Use: ?strategy=fundingArb|gridTrading|meanReversion|orderFlow&action=enable|disable' }));
+          return;
+        }
+        try {
+          const { enableStrategy, disableStrategy } = await import('../src/lib/strategy-manager');
+          if (action === 'enable') await enableStrategy(strategy);
+          else await disableStrategy(strategy);
+          log('INFO', `${action === 'enable' ? '✅' : '🛑'} Strategy ${strategy} ${action === 'enable' ? 'habilitada' : 'deshabilitada'}`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, strategy, action }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
+      // Reset circuit breaker
+      if (url.pathname === '/reset-circuit-breaker') {
+        try {
+          const { resetCircuitBreaker } = await import('../src/lib/strategy-manager');
+          resetCircuitBreaker();
+          log('INFO', '🔄 Circuit breaker reset');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Circuit breaker reset' }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
+      // Scan funding opportunities (read-only, no execution)
+      if (url.pathname === '/funding-scan') {
+        try {
+          const { scanFundingOpportunities } = await import('../src/lib/funding-arb');
+          const opportunities = await scanFundingOpportunities();
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(opportunities, null, 2));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Mean reversion signal scan (read-only, no execution)
+      if (url.pathname === '/mean-reversion-scan') {
+        try {
+          const { generateMeanReversionSignal } = await import('../src/lib/mean-reversion');
+          const signals = [];
+          for (const asset of ['BTC/USD', 'ETH/USD']) {
+            const signal = await generateMeanReversionSignal(asset);
+            signals.push(signal);
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify(signals, null, 2));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
         }
         return;
       }
@@ -911,6 +1070,12 @@ function startStatusServer(): Promise<void> {
           setConfig: '/set-config (POST — config personalizada)',
           migrate: '/migrate (GET — fuerza migración de DB)',
           forceCloseAll: '/force-close-all (GET — cierra TODAS las posiciones abiertas)',
+          strategies: '/strategies (GET — dashboard de estrategias)',
+          strategyPreset: '/strategy-preset?preset=DRY_RUN|CONSERVATIVE|MODERATE|AGGRESSIVE',
+          toggleStrategy: '/toggle-strategy?strategy=fundingArb|gridTrading|meanReversion|orderFlow&action=enable|disable',
+          fundingScan: '/funding-scan (GET — escanear funding rates)',
+          meanReversionScan: '/mean-reversion-scan (GET — escanear señales mean reversion)',
+          resetCircuitBreaker: '/reset-circuit-breaker (GET)',
         },
         dashboard: 'https://signal-trade-seven.vercel.app',
       }, null, 2));

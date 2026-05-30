@@ -243,3 +243,67 @@ model Account {
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
 }
+
+// === NEW STRATEGY MODELS (v8) ===
+
+model StrategyPosition {
+  id                String   @id @default(cuid())
+  strategy          String   // funding_arb, grid_trading, mean_reversion, orderflow
+  asset             String   // BTC/USD, ETH/USD
+  direction         String?  // HIGHER, LOWER, SHORT_PERP_LONG_SPOT, LONG_PERP_SHORT_SPOT, null for grid
+  // === Position Details ===
+  entryPrice        Float?
+  currentPrice      Float?
+  stopLoss          Float?
+  takeProfit        Float?
+  quantity          Float    @default(0)
+  leverage          Float    @default(1)
+  // === P&L ===
+  unrealizedPnl     Float    @default(0)
+  realizedPnl       Float    @default(0)
+  totalFundingCollected Float @default(0) // For funding arb
+  totalFills        Int      @default(0)  // For grid trading
+  // === Strategy-specific metadata ===
+  metadataJson      String?  // JSON: strategy-specific data (grid levels, BB touch, etc.)
+  // === Status ===
+  status            String   @default("OPEN") // OPEN, CLOSING, CLOSED, STOPPED
+  closeReason       String?
+  // === Risk ===
+  maxFavorable      Float    @default(0)
+  maxAdverse        Float    @default(0)
+  // === Audit ===
+  executionMode     String   @default("PAPER") // PAPER, LIVE
+  openedAt          DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+  closedAt          DateTime?
+
+  @@index([strategy, status])
+  @@index([asset, strategy])
+}
+
+model StrategyStats {
+  id                String   @id @default(cuid())
+  strategy          String   // funding_arb, grid_trading, mean_reversion, orderflow
+  asset             String?  // null = all assets
+  // === Performance ===
+  totalTrades       Int      @default(0)
+  totalWins         Int      @default(0)
+  totalLosses       Int      @default(0)
+  winRate           Float    @default(0)
+  totalPnl          Float    @default(0)
+  avgPnlPerTrade    Float    @default(0)
+  profitFactor      Float    @default(0)
+  maxDrawdown       Float    @default(0)
+  sharpeRatio       Float    @default(0)
+  // === Strategy-specific ===
+  totalFundingCollected Float @default(0) // funding arb
+  totalGridFills    Int      @default(0)  // grid trading
+  avgHoldingPeriodHours Float @default(0)
+  // === Period ===
+  period            String   @default("ALL") // ALL, DAILY, WEEKLY, MONTHLY
+  // === Audit ===
+  lastUpdated       DateTime @updatedAt
+  createdAt         DateTime @default(now())
+
+  @@unique([strategy, asset, period])
+}
