@@ -96,3 +96,21 @@ Stage Summary:
 - 5 views: Dashboard, Trading, Estrategias, Señales, Configuración
 - Sidebar navigation with mobile responsive design
 - All text in Spanish
+---
+Task ID: fix-bybit-api-and-ai-analyzer
+Agent: main
+Task: Fix Bybit API IntervalTime error, slow cycles, and AI Analyzer not caching
+
+Work Log:
+- Identified Bybit V5 API change: klines and OI endpoints now require 'intervalTime' parameter
+- Added intervalTime param to getKlines() and getOpenInterest() in broker-client.ts
+- Reduced request timeout from 15s to 8s, max retries from 3 to 2
+- Added early return for param errors (retCode 10001) to skip useless retries
+- Fixed AI Analyzer never caching: added getAIMarketAnalysis() call at start of strategy cycle
+- Previously AI only ran inside Mean Reversion signal generation, which requires good sessions
+- Now AI always runs, even in OffHours, so dashboard has cached analysis to show
+
+Stage Summary:
+- Commit 762a4e0 pushed to GitHub
+- Should fix: Bybit API errors, 500s cycle times, AI Analyzer "no cached analysis"
+- Expected cycle time improvement: ~500s → ~60-90s
