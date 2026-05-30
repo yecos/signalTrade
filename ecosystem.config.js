@@ -2,10 +2,11 @@ module.exports = {
   apps: [
     {
       name: 'signaltrader',
-      script: 'npx',
-      args: 'tsx scripts/worker.ts --auto',
+      script: 'start-worker.bat',
       cwd: 'C:\\Users\\yecos\\Downloads\\trade\\signalTrade',
       interpreter: 'none',
+      exec_interpreter: 'none',
+      shell: true,
       env: {
         AUTO_START: 'true',
         NODE_ENV: 'production',
