@@ -77,7 +77,7 @@ export interface SignalGenerationResult {
   reason: string;
   indicators: IndicatorSnapshot | null;
   dataAvailability: Record<string, boolean>;
-  dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK';
+  dataSource: 'BINANCE' | 'TWELVEDATA' | 'BYBIT_DB' | 'FALLBACK';
   skipped: boolean;
   skipReason?: string;
   // === Phase 4 fields ===
@@ -320,33 +320,42 @@ export async function generateAutoSignal(
   let tradeManagementPlan: TradeManagementPlan | null = null;
   let calculatedRR = riskReward; // Pre-declare for use in confluence
   
-  // Step 1: Get market data - try REAL market engine first, then fall back to DB
+  // Step 1: Get market data — DB FIRST (real Bybit data), API as fallback
+  // The market-data-feeder saves Bybit klines to marketCandle DB every cycle.
+  // Using DB candles directly means we consume the data we already paid API calls for,
+  // and Bybit data is higher quality than CoinGecko/Binance for our use case.
   let candles: any[] = [];
-  let dataSource: 'BINANCE' | 'TWELVEDATA' | 'FALLBACK' = 'FALLBACK';
+  let dataSource: 'BINANCE' | 'TWELVEDATA' | 'BYBIT_DB' | 'FALLBACK' = 'FALLBACK';
   
-  // Try real market engine (Binance for crypto, TwelveData for forex)
+  // PRIORITY 1: DB candles (real Bybit klines from market-data-feeder)
   try {
-    const engineResult = await getEngineCandles(asset, timeframe, 100);
-    if (engineResult.candles.length >= 30) {
-      candles = engineResult.candles;
-      dataSource = engineResult.source as any;
+    const dbCandles = await getDBCandles(asset, timeframe, 100);
+    if (dbCandles.length >= 50) {
+      candles = dbCandles;
+      dataSource = 'BYBIT_DB';
     }
   } catch (err) {
-    console.error('Market engine failed, falling back to DB:', err);
+    console.error('DB candles failed, falling back to engine:', err);
   }
-  
-  // If real data not available, use DB/simulated candles
+
+  // PRIORITY 2: Real market engine (Binance/CoinGecko/TwelveData)
   if (candles.length < 50) {
-    const dbCandles = await getDBCandles(asset, timeframe, 100);
-    if (dbCandles.length >= 30) {
-      candles = dbCandles;
-      dataSource = 'FALLBACK';
-    } else {
-      // Generate candles as last resort
-      await generateHistoricalCandles(asset, timeframe, 200);
-      candles = await getDBCandles(asset, timeframe, 100);
-      dataSource = 'FALLBACK';
+    try {
+      const engineResult = await getEngineCandles(asset, timeframe, 100);
+      if (engineResult.candles.length >= 30) {
+        candles = engineResult.candles;
+        dataSource = engineResult.source as any;
+      }
+    } catch (err) {
+      console.error('Market engine failed, falling back to generated:', err);
     }
+  }
+
+  // PRIORITY 3: Generate candles as last resort
+  if (candles.length < 30) {
+    await generateHistoricalCandles(asset, timeframe, 200);
+    candles = await getDBCandles(asset, timeframe, 100);
+    dataSource = 'FALLBACK';
   }
   
   if (candles.length < 30) {
@@ -896,7 +905,7 @@ export async function generateAutoSignal(
     patterns: bestPattern !== null,
     session: true,
     volume: indicators.volumeAnalysis.avgVolume20 > 0,
-    realMarketData: dataSource === 'BINANCE' || dataSource === 'TWELVEDATA',
+    realMarketData: dataSource === 'BINANCE' || dataSource === 'TWELVEDATA' || dataSource === 'BYBIT_DB',
     regime: regimeResult.regime !== 'RANGING' || regimeResult.confidence > 30,
     quality: qualityResult.score >= 50,
   };
@@ -904,7 +913,7 @@ export async function generateAutoSignal(
   const availableCount = Object.values(dataAvailability).filter(Boolean).length;
   
   let analysisMode: 'FULL' | 'PARTIAL' | 'FALLBACK' | 'DEMO';
-  if (dataSource === 'BINANCE' || dataSource === 'TWELVEDATA') {
+  if (dataSource === 'BINANCE' || dataSource === 'TWELVEDATA' || dataSource === 'BYBIT_DB') {
     analysisMode = availableCount >= 6 ? 'FULL' : 'PARTIAL';
   } else if (dataSource === 'FALLBACK') {
     analysisMode = 'FALLBACK';
