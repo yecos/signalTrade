@@ -38,6 +38,8 @@ export interface ExecutionRequest {
   atr: number;
   // Market data
   currentPrice?: number;  // Latest real-time price (if available)
+  // Data collection mode
+  dataCollectionMode?: boolean; // If true, relax risk checks for data collection
 }
 
 export interface ExecutionResult {
@@ -118,6 +120,7 @@ export class ExecutionEngine {
       confidence: req.confidence,
       edgeClassification: req.edgeClassification,
       provenEdgeTier: req.provenEdgeTier,
+      dataCollectionMode: req.dataCollectionMode || false,
     });
 
     if (!riskAssessment.allowed) {

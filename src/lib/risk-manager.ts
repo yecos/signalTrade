@@ -218,6 +218,7 @@ export async function assessRisk(params: {
   confidence: number;       // Signal confidence (0-100)
   edgeClassification: string; // GREEN, YELLOW, RED, GREY
   provenEdgeTier: string;   // TIER_1, TIER_2, TIER_3, UNKNOWN, BLOCKED
+  dataCollectionMode?: boolean; // If true, relax edge/position checks for data collection
 }): Promise<RiskAssessment> {
   const config = await getRiskConfig();
   const account = await getOrCreateAccount();
@@ -294,7 +295,7 @@ export async function assessRisk(params: {
   const sameAssetPositions = await db.position.count({
     where: { asset: params.asset, status: 'OPEN' },
   });
-  if (sameAssetPositions > 0) {
+  if (sameAssetPositions > 0 && !params.dataCollectionMode) {
     return {
       allowed: false,
       reason: `Ya existe posición abierta en ${params.asset}`,
@@ -302,6 +303,8 @@ export async function assessRisk(params: {
       stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
       riskRewardRatio: 0, warnings, circuitBreaker: false,
     };
+  } else if (sameAssetPositions > 0 && params.dataCollectionMode) {
+    warnings.push(`Posición duplicada en ${params.asset} — permitido en modo recolección`);
   }
 
   // ═══ CHECK 7: COOLDOWN AFTER LOSS ═══
@@ -321,13 +324,18 @@ export async function assessRisk(params: {
 
   // ═══ CHECK 8: PROVEN EDGE REQUIREMENT ═══
   if (params.provenEdgeTier === 'BLOCKED' || params.edgeClassification === 'RED') {
-    return {
-      allowed: false,
-      reason: `Edge bloqueado/rojo: ${params.provenEdgeTier} / ${params.edgeClassification}. No operar.`,
-      positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
-      stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
-      riskRewardRatio: 0, warnings, circuitBreaker: false,
-    };
+    if (params.dataCollectionMode) {
+      // MODO RECOLECCIÓN: Permitir pero con tamaño mínimo y advertencia
+      warnings.push(`Edge ${params.provenEdgeTier}/${params.edgeClassification} — permitido en modo recolección con tamaño mínimo`);
+    } else {
+      return {
+        allowed: false,
+        reason: `Edge bloqueado/rojo: ${params.provenEdgeTier} / ${params.edgeClassification}. No operar.`,
+        positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
+        stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
+        riskRewardRatio: 0, warnings, circuitBreaker: false,
+      };
+    }
   }
 
   // ═══ WARNINGS (non-blocking) ═══

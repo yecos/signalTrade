@@ -1503,6 +1503,7 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
             setupScore: result.setupScore,
             qualityScore: result.qualityScore,
             atr: atr || result.indicators?.atr14 || 0,
+            dataCollectionMode: isDataCollectionMode, // Pass data collection mode to risk manager
           });
 
           if (execResult.success) {
