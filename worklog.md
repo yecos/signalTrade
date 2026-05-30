@@ -1,18 +1,21 @@
 ---
 Task ID: 1
-Agent: Main
-Task: Fix backtest v8 bugs + update strategy presets based on backtest findings
+Agent: main
+Task: Fix position limit bug, configure proven strategy, push to GitHub
 
 Work Log:
-- Analyzed backtest v8.1 results: Mean Reversion ETHUSDT 1h is the only legitimate winner (PF 2.32, WR 62.3%, Sharpe 6.04)
-- Funding arb: $0.00 prices partially fixed in v8.1 (Binance price matching), but strategy still has no edge (0% WR)
-- Grid trading: v8.1 now shows realistic results with underwater positions and global stop-loss
-- Updated Mean Reversion default config: timeframe M15 → H1 (backtest proven)
-- Updated all strategy presets: disable funding arb (no edge), prioritize MR ETH H1 + Grid ETH
-- Pushed changes to GitHub (commit a02bd26)
+- Diagnosed position limit root cause: worker updated account.maxOpenPositions but risk manager reads from appSettings.riskConfig.maxOpenPositions — two separate config stores, only one enforced
+- Fixed worker to update BOTH account table AND riskConfig in appSettings
+- Reduced position limit from 8 → 5 (proven edge doesn't need data collection mode anymore)
+- Fixed startup cleanup to close ALL positions from previous sessions (not just >40 min old) — prevents "10/10 stuck" bug
+- Added auto-evict in risk manager: when at position limit and oldest position is >30 min old, automatically close it to make room for new trades
+- Updated strategy-manager defaults: Mean Reversion ETHUSDT 1H enabled (PF 2.32, WR 62.3%, Sharpe 6.04), funding arb and grid trading disabled
+- Updated worker startup message with backtest v8.1 proven edge info
+- Pushed all fixes to GitHub (commit cc7ea03)
 
 Stage Summary:
-- Mean Reversion ETHUSDT 1H is the key strategy with genuine edge
-- Funding Arb disabled in all presets (no edge in backtest)
-- Grid Trading ETH is secondary strategy (PF 3.17 but with range break risk)
-- All changes pushed to GitHub successfully
+- Position limit bug fixed: both config stores now synchronized
+- Auto-evict prevents future "stuck at capacity" situations
+- Strategy manager now defaults to the proven Mean Reversion ETHUSDT 1H edge
+- All 3 files committed and pushed: worker.ts, risk-manager.ts, strategy-manager.ts
+- Funding arb $0.00 backtest issue still pending (low priority since strategy is disabled)
