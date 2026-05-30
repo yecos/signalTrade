@@ -1,0 +1,105 @@
+
+╔══════════════════════════════════════════════════════════════════════╗
+║  SIGNALTRADER PRO — BACKTEST v6 (INSTITUTIONAL TREND FOLLOWING)     ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+📊 Asset: BTC/USD | TF: 4h | Months: 6
+💰 Initial: $10,000 | Risk: 1% | Fee: 0.12% round trip
+📈 Trailing: 2x ATR → 1.5x ATR | SL: 0.5x ATR buffer
+🎯 Min Confluence: 5/8 | Min ADX: 22 | Cooldown: 3 bars
+
+══════════════════════════════════════════════════════════════════════
+  RESULTADOS FINANCIEROS
+══════════════════════════════════════════════════════════════════════
+
+  Balance Final:    $8967.97
+  Retorno Total:    -10.32% ($-1032.03)
+  Max Drawdown:     12.98%
+
+══════════════════════════════════════════════════════════════════════
+  ESTADÍSTICAS DE TRADING
+══════════════════════════════════════════════════════════════════════
+
+  Total Trades:     122
+  Wins:             52 | Losses: 70
+  Win Rate:         🟡 42.6%
+  Avg Win:          +1.919%
+  Avg Loss:         -1.889%
+  Profit Factor:    0.77
+  Expected Value:   $-8.46 per trade
+  Avg Hold:         6.9 bars (27.4 hours)
+  Avg Max Favorable:2.37%
+  Avg Max Adverse:  1.66%
+
+══════════════════════════════════════════════════════════════════════
+  IMPACTO DE COSTOS
+══════════════════════════════════════════════════════════════════════
+
+  Total Fees:       $552.61
+  P&L sin fees:     $-479.42
+  P&L con fees:     $-1032.03
+  Fee % of Capital: 5.53%
+
+══════════════════════════════════════════════════════════════════════
+  POR RAZÓN DE SALIDA
+══════════════════════════════════════════════════════════════════════
+
+  💰 TRAILING_STOP    79 trades | $2731.36 total P&L
+  💸 INITIAL_SL       27 trades | $-2810.69 total P&L
+  💸 TREND_BREAK      14 trades | $-931.60 total P&L
+  💸 END_OF_DATA      2 trades | $-21.10 total P&L
+
+══════════════════════════════════════════════════════════════════════
+  POR DIRECCIÓN
+══════════════════════════════════════════════════════════════════════
+
+  🟡 LONG   42.6% WR (26W/35L)
+  🟡 SHORT  42.6% WR (26W/35L)
+
+══════════════════════════════════════════════════════════════════════
+  FILTROS
+══════════════════════════════════════════════════════════════════════
+
+  Velas escaneadas:  979
+  Señales rechazadas: 613
+  Trades ejecutados:  122
+  Ratio aceptación:   12.46%
+
+══════════════════════════════════════════════════════════════════════
+  TOP 5 MEJORES TRADES
+══════════════════════════════════════════════════════════════════════
+
+  #1 SHORT | TRAILING_STOP | +8.82% | $219.52
+     Max Favorable: 12.2% | Hold: 7 bars | ADX: 42
+  #2 SHORT | TRAILING_STOP | +7.96% | $194.24
+     Max Favorable: 11.9% | Hold: 10 bars | ADX: 53
+  #3 SHORT | TRAILING_STOP | +5.84% | $182.06
+     Max Favorable: 8.8% | Hold: 2 bars | ADX: 73
+  #4 LONG | TRAILING_STOP | +1.31% | $134.11
+     Max Favorable: 2.4% | Hold: 1 bars | ADX: 37
+  #5 LONG | TRAILING_STOP | +3.38% | $130.54
+     Max Favorable: 4.9% | Hold: 4 bars | ADX: 34
+
+══════════════════════════════════════════════════════════════════════
+  TOP 5 PEORES TRADES
+══════════════════════════════════════════════════════════════════════
+
+  #1 SHORT | INITIAL_SL | -1.09% | $-113.84
+     Max Adverse: 3.0% | Max Favorable: 0.1% | Hold: 2 bars
+  #2 SHORT | INITIAL_SL | -1.12% | $-111.17
+     Max Adverse: 2.0% | Max Favorable: 0.5% | Hold: 2 bars
+  #3 LONG | INITIAL_SL | -0.95% | $-111.17
+     Max Adverse: 1.9% | Max Favorable: 0.1% | Hold: 1 bars
+  #4 SHORT | INITIAL_SL | -1.60% | $-109.13
+     Max Adverse: 2.2% | Max Favorable: 0.7% | Hold: 4 bars
+  #5 SHORT | INITIAL_SL | -4.16% | $-107.13
+     Max Adverse: 6.7% | Max Favorable: 0.5% | Hold: 2 bars
+
+╔══════════════════════════════════════════════════════════════════════╗
+║  🎯 VEREDICTO                                                       ║
+╚══════════════════════════════════════════════════════════════════════╝
+
+  ❌ NO HAY EDGE en esta configuración.
+  → Balance: $8967.97 | PF: 0.77
+  → Probar: cambiar trailing (2x), riesgo (1%), o confluencia (5).
+  → Considerar: diferentes assets o timeframe diario.
