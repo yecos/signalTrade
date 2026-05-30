@@ -508,19 +508,33 @@ export async function generateAutoSignal(
   provenEdge = provenEdgeResult.edge;
 
   if (!provenEdgeAllowed) {
-    // HARD BLOCK for confirmed losers (breakout, trend_continuation, none)
+    // BLOCKED patterns (breakout, trend_continuation, none)
     if (provenEdgeResult.tier === 'BLOCKED') {
-      direction = 'NO_OPERAR';
-      reason = provenEdgeResult.reason;
-      confidence = 0;
+      if (currentIsDataCollectionMode) {
+        // MODO RECOLECCIÓN: No bloquear — necesitamos datos de TODOS los patrones
+        // Reducir confianza pero generar señal para construir dataset
+        confidence = Math.max(5, confidence + provenEdgeResult.confidenceBoost + 40); // partial restore
+        confidence = Math.min(confidence, 35); // cap at 35 so it's clearly a data-collection signal
+        reason += ` [MODO RECOLECCIÓN: Patrón bloqueado en producción pero generando para dataset. Confianza cap 35%]`;
+      } else {
+        // Production mode: hard block confirmed losers
+        direction = 'NO_OPERAR';
+        reason = provenEdgeResult.reason;
+        confidence = 0;
+      }
     } else {
       // UNKNOWN combo — not in proven list but not a confirmed loser
-      // In data collection mode: allow but reduce confidence (we need data!)
-      // In production mode: block
-      if (currentIsDataCollectionMode && bestPattern && direction !== 'NO_OPERAR') {
+      if (currentIsDataCollectionMode && direction !== 'NO_OPERAR') {
         // Keep the direction but reduce confidence — we need this data
-        confidence = Math.max(0, confidence + provenEdgeResult.confidenceBoost);
+        confidence = Math.max(5, confidence + provenEdgeResult.confidenceBoost);
         reason += ` [MODO RECOLECCIÓN: Combo no probado pero generando señal para dataset]`;
+      } else if (currentIsDataCollectionMode && direction === 'NO_OPERAR' && bestPattern) {
+        // Even if direction was set to NO_OPERAR earlier, in data collection mode
+        // we still want to generate signals with detected patterns
+        // Re-evaluate direction from pattern
+        direction = bestPattern.direction === 'BULLISH' ? 'HIGHER' : 'LOWER';
+        confidence = Math.max(5, bestPattern.confidence + provenEdgeResult.confidenceBoost);
+        reason += ` [MODO RECOLECCIÓN: Restaurando dirección desde patrón para dataset]`;
       } else {
         direction = 'NO_OPERAR';
         reason = provenEdgeResult.reason;
@@ -618,7 +632,9 @@ export async function generateAutoSignal(
     reason = `Patrón ${bestPattern?.type} no compatible con régimen ${regimeResult.regime}. ${regimeAdvice.reason}`;
     confidence = Math.min(confidence, 20);
   } else if (regimeMismatch && isDataCollectionMode) {
-    reason += ` [RÉGimen: ${regimeResult.regime} - Patrón no óptimo pero generando para dataset]`;
+    // MODO RECOLECCIÓN: Solo reducir confianza un poco, no bloquear
+    confidence = Math.max(0, confidence - 5);
+    reason += ` [MODO RECOLECCIÓN: Régimen ${regimeResult.regime} no óptimo para patrón pero generando para dataset, -5 confianza]`;
   }
 
   // === NEW Step 6.7: Multi-Timeframe filter ===
@@ -680,19 +696,16 @@ export async function generateAutoSignal(
     edgeReason = edgeDecision.reason;
 
     if (edgeClassification === 'RED') {
-      // HARD BLOCK: This combo is a confirmed loser from backtest data.
-      // Even in data collection mode, we don't want to trade confirmed losers.
-      // EXCEPT: if it's a non-blocked pattern (liquidity_sweep, fakeout, etc.)
-      // we still generate for dataset even with RED edge — we need the data.
-      const isBlockedPattern = BLOCKED_PATTERNS.hasOwnProperty(bestPattern?.type || 'none');
-      if (isBlockedPattern || !isDataCollectionMode) {
+      // RED edge: This combo is a confirmed loser from backtest data.
+      if (isDataCollectionMode) {
+        // MODO RECOLECCIÓN: Generar de todas formas — necesitamos datos para re-evaluar
+        confidence = Math.max(5, Math.min(confidence + edgeDecision.confidenceAdjustment + 30, 30));
+        reason += ` [MODO RECOLECCIÓN: Edge rojo pero generando para dataset, confianza cap 30%]`;
+      } else {
+        // Production: hard block
         direction = 'NO_OPERAR';
         reason = edgeDecision.reason;
         confidence = Math.max(0, Math.min(confidence + edgeDecision.confidenceAdjustment, 15));
-      } else {
-        // Data collection: generate signal even with RED edge for non-blocked patterns
-        confidence = Math.max(0, confidence + edgeDecision.confidenceAdjustment);
-        reason += ` [MODO RECOLECCIÓN: Edge rojo pero patrón no bloqueado, generando para dataset]`;
       }
     } else if (edgeClassification === 'GREEN') {
       // CONFIRMED EDGE: Boost confidence and setup score
@@ -799,15 +812,28 @@ export async function generateAutoSignal(
 
   // Step 8: Final NO_OPERAR check
   if (isDataCollectionMode) {
-    if (direction === 'NO_OPERAR' || (!bestPattern && confidence < 10)) {
+    // MODO RECOLECCIÓN: Mucho más permisivo — necesitamos datos
+    // Solo NO_OPERAR si no hay NINGUNA dirección clara de los indicadores
+    if (direction === 'NO_OPERAR' && confidence < 3) {
+      // Truly no direction at all — even indicators are neutral
       const noOperarReasons: string[] = [];
-      if (!bestPattern) noOperarReasons.push('Sin patrón detectado');
-      if (confidence < 10) noOperarReasons.push(`Sin dirección clara: ${confidence.toFixed(0)}%`);
+      noOperarReasons.push('Sin dirección clara de indicadores ni patrones');
       direction = 'NO_OPERAR';
-      reason = `NO OPERAR [MODO RECOLECCIÓN]: ${noOperarReasons.join('. ')}. Sin suficiente señal para determinar dirección.`;
+      reason = `NO OPERAR [MODO RECOLECCIÓN]: ${noOperarReasons.join('. ')}. Mercado completamente neutral.`;
+    } else if (direction === 'NO_OPERAR' && confidence >= 3) {
+      // We have some indicator direction but were set to NO_OPERAR by a filter
+      // In data collection: OVERRIDE — use indicator direction to collect data
+      const indicatorDir = getIndicatorDirection(indicators);
+      if (indicatorDir.direction !== 'NO_OPERAR') {
+        direction = indicatorDir.direction;
+        confidence = Math.max(8, Math.min(confidence, 25)); // low but valid for dataset
+        reason = indicatorDir.reason + ` [MODO RECOLECCIÓN: Forzando generación para dataset, confianza cap 25%]`;
+      } else {
+        direction = 'NO_OPERAR';
+        reason = `NO OPERAR [MODO RECOLECCIÓN]: Indicadores completamente neutrales, sin dirección posible.`;
+      }
     }
-    // In data collection: allow signals with confidence >= 10 if they have a pattern
-    // We need WIN/LOSS data, so we generate signals even at lower confidence
+    // In data collection: allow signals with any confidence >= 5
     if (direction !== 'NO_OPERAR' && confidence < 30) {
       reason += ` [MODO RECOLECCIÓN: Confianza baja (${confidence.toFixed(0)}%) pero generando señal para construir dataset]`;
     }
