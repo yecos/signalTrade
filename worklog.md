@@ -74,3 +74,25 @@ Stage Summary:
 - All 3 issues resolved
 - Worker confirmed running correctly from user's output
 - Auto-trader V7 is now protected at ALL entry points (cycle override, /activate, /optimal-config)
+---
+Task ID: dashboard-rebuild
+Agent: main + full-stack-developer
+Task: Rebuild SignalTrader Pro dashboard with real worker data and professional design
+
+Work Log:
+- Explored entire frontend architecture (3,631-line monolithic page.tsx)
+- Identified problems: hardcoded neon colors, fake metrics, no component extraction, heavy polling
+- Created 3 new API endpoints: /api/worker-status, /api/strategy-status, /api/ai-analysis
+- Created React Query hooks in /src/lib/hooks/use-api.ts with proper caching
+- Created 8 reusable dashboard components in /src/components/dashboard/
+- Replaced monolithic page.tsx with modular AppShell + 5 page views
+- Pushed commit 340fd42 to GitHub
+
+Stage Summary:
+- 16 files changed: 3,134 insertions, 3,619 deletions
+- New API endpoints read REAL worker data from Turso DB
+- React Query replaces manual fetch+useState (15s/30s/60s caching)
+- Professional dark theme using shadcn/ui CSS variables
+- 5 views: Dashboard, Trading, Estrategias, Señales, Configuración
+- Sidebar navigation with mobile responsive design
+- All text in Spanish
