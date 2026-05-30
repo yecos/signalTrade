@@ -119,7 +119,7 @@ export const DEFAULT_CONFIG: AutoTraderConfig = {
   timeframe: 'M5',
   intervalMinutes: 5,
   minSetupScore: 30,
-  maxConcurrentSignals: 10,
+  maxConcurrentSignals: 50,
   confidenceBoost: 0,
   noOperarThreshold: 40,
   strictMode: true, // Only trade proven edges — BLOCKED patterns never pass
@@ -1443,6 +1443,58 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
   let tradesRejected = 0;
   const errors: string[] = [];
   
+  // ═══ CLEANUP: Close stale PENDING signals whose trades were never executed ═══
+  // These accumulate when Risk Manager rejects trades but signals stay PENDING
+  try {
+    const stalePending = await db.signal.findMany({
+      where: {
+        status: 'PENDING',
+        source: 'AUTO',
+        expirationTime: { lte: new Date() },
+      },
+    });
+    if (stalePending.length > 0) {
+      await db.signal.updateMany({
+        where: {
+          id: { in: stalePending.map(s => s.id) },
+          status: 'PENDING',
+        },
+        data: {
+          status: 'CLOSED',
+          result: 'DRAW',
+          verificationMethod: 'EXPIRED_UNEXECUTED',
+        },
+      });
+      console.log(`[AUTO-TRADER] Cleaned up ${stalePending.length} expired PENDING signals`);
+    }
+
+    // Also close PENDING signals that have been pending for > 2 hours (stuck)
+    const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    const stuckPending = await db.signal.findMany({
+      where: {
+        status: 'PENDING',
+        source: 'AUTO',
+        entryTime: { lte: twoHoursAgo },
+      },
+    });
+    if (stuckPending.length > 0) {
+      await db.signal.updateMany({
+        where: {
+          id: { in: stuckPending.map(s => s.id) },
+          status: 'PENDING',
+        },
+        data: {
+          status: 'CLOSED',
+          result: 'DRAW',
+          verificationMethod: 'STUCK_CLEANUP',
+        },
+      });
+      console.log(`[AUTO-TRADER] Cleaned up ${stuckPending.length} stuck PENDING signals (>2h old)`);
+    }
+  } catch (cleanupErr: any) {
+    console.error('[AUTO-TRADER] Signal cleanup failed:', cleanupErr.message);
+  }
+
   // Check max concurrent signals
   const pendingCount = await db.signal.count({
     where: { status: 'PENDING', source: 'AUTO' },
@@ -1516,6 +1568,20 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
           } else {
             tradesRejected++;
             console.log(`[AUTO-EXEC] ❌ Trade rejected: ${execResult.reason} | Mode: ${autoExecution.mode}`);
+            // Close the signal since the trade was rejected — don't leave it PENDING
+            try {
+              await db.signal.update({
+                where: { id: result.signalId },
+                data: {
+                  status: 'CLOSED',
+                  result: 'NO_OPERAR',
+                  noOperarReason: `Trade rechazado: ${execResult.reason}`,
+                },
+              });
+              console.log(`[AUTO-EXEC] Signal ${result.signalId} closed (trade rejected)`);
+            } catch (closeErr: any) {
+              console.error(`[AUTO-EXEC] Failed to close rejected signal:`, closeErr.message);
+            }
           }
         } catch (execErr: any) {
           tradesRejected++;
