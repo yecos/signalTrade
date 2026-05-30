@@ -10,6 +10,26 @@ const globalForPrisma = globalThis as unknown as {
   prisma: PrismaClient | undefined
 }
 
+// ═══ SUPPRESS Prisma's transient "prisma:error" noise ═══
+// Prisma's internal engine logs transient errors like "prisma:error fetch failed"
+// directly to console BEFORE our withRetry() catches the exception.
+// These are misleading — withRetry() handles them transparently.
+// We filter these specific transient messages from console.error.
+const _origConsoleError = console.error
+console.error = function(...args: any[]) {
+  const msg = args.map(a => typeof a === 'string' ? a : '').join(' ')
+  if (msg.includes('prisma:error') && (
+    msg.includes('fetch failed') ||
+    msg.includes('ECONNRESET') ||
+    msg.includes('ETIMEDOUT') ||
+    msg.includes('socket hang up')
+  )) {
+    // Suppress — withRetry() handles these transient errors
+    return
+  }
+  return _origConsoleError.apply(console, args)
+}
+
 function createPrismaClient(): PrismaClient {
   const tursoUrl = process.env.TURSO_DATABASE_URL
   const tursoToken = process.env.TURSO_AUTH_TOKEN
@@ -32,34 +52,15 @@ function createPrismaClient(): PrismaClient {
 
       const client = new PrismaClient({
         adapter,
-        // Only log errors (queries/info are too noisy)
-        log: [
-          {
-            emit: 'stdout',
-            level: 'error',
-          },
-        ],
+        // ═══ DISABLE Prisma's own error logging ═══
+        // Prisma logs "prisma:error fetch failed" to console BEFORE our withRetry()
+        // catches the exception. These transient errors are noise — withRetry() handles
+        // all retries and logs only when it actually fails after all retries.
+        // We set log: [] and rely entirely on withRetry() for error reporting.
+        log: [],
       })
 
       console.log('[DB] ✅ PrismaClient with Turso adapter created successfully')
-
-      // ═══ SUPPRESS Prisma's transient error logging ═══
-      // Prisma logs "prisma:error fetch failed" BEFORE our withRetry() catches them.
-      // We intercept the specific format to reduce noise. withRetry() handles the actual retries.
-      const origStdoutWrite = process.stdout.write.bind(process.stdout)
-      let suppressTransient = true
-      process.stdout.write = function(this: any, ...args: any[]) {
-        const data = typeof args[0] === 'string' ? args[0] : ''
-        if (suppressTransient && data && (
-          data.includes('prisma:error fetch failed') ||
-          data.includes('prisma:error ECONNRESET') ||
-          data.includes('prisma:error ETIMEDOUT')
-        )) {
-          // Suppress — withRetry() handles these
-          return true
-        }
-        return origStdoutWrite.apply(this, args)
-      }
 
       return client
     } catch (err) {
