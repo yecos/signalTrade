@@ -297,7 +297,7 @@ export async function assessRisk(params: {
   const openPositions = await db.position.count({ where: { status: 'OPEN' } });
   // In data collection mode, allow up to 10 positions (need more trades for statistics)
   const effectiveMaxPositions = params.dataCollectionMode
-    ? Math.max(config.maxOpenPositions, 10)
+    ? Math.max(config.maxOpenPositions, 20)
     : config.maxOpenPositions;
   if (openPositions >= effectiveMaxPositions) {
     return {

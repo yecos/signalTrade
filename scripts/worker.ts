@@ -816,6 +816,36 @@ function startStatusServer(): Promise<void> {
         return;
       }
 
+      // NEW: Force close ALL open positions (emergency cleanup)
+      if (url.pathname === '/force-close-all') {
+        try {
+          log('INFO', '🧹 Force-close ALL solicitado vía /force-close-all');
+          const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
+          const engine = getExecutionEngine();
+          let closed = 0;
+          for (const pos of openPositions) {
+            try {
+              await engine.closePosition(pos.id, `FORCE CLOSE via /force-close-all`);
+              closed++;
+            } catch {
+              // Force-close in DB directly
+              await db.position.update({
+                where: { id: pos.id },
+                data: { status: 'CLOSED', closedAt: new Date() },
+              });
+              closed++;
+            }
+          }
+          log('INFO', `🧹 Force-closed ${closed} positions`);
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, closed, message: `Closed ${closed} positions` }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
+        return;
+      }
+
       // Default: simple status JSON
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -841,6 +871,7 @@ function startStatusServer(): Promise<void> {
           optimalConfig: '/optimal-config (GET — aplica config óptima)',
           setConfig: '/set-config (POST — config personalizada)',
           migrate: '/migrate (GET — fuerza migración de DB)',
+          forceCloseAll: '/force-close-all (GET — cierra TODAS las posiciones abiertas)',
         },
         dashboard: 'https://signal-trade-seven.vercel.app',
       }, null, 2));
@@ -980,6 +1011,41 @@ async function main(): Promise<void> {
 
   // Start status server FIRST (keeps process alive)
   await startStatusServer();
+
+  // ═══ CLEANUP: Close stale positions from previous sessions ═══
+  // Positions older than 40 min (expiration time) are definitely stale
+  try {
+    const stalePositions = await db.position.findMany({ where: { status: 'OPEN' } });
+    const now = Date.now();
+    const STALE_THRESHOLD_MS = 40 * 60 * 1000; // 40 minutes (matches expiration)
+    let staleClosed = 0;
+
+    const engine = getExecutionEngine();
+    for (const pos of stalePositions) {
+      const age = now - new Date(pos.openedAt).getTime();
+      if (age > STALE_THRESHOLD_MS) {
+        try {
+          await engine.closePosition(pos.id, `STARTUP CLEANUP: position open ${Math.round(age / 60000)} min (stale from previous session)`);
+          staleClosed++;
+        } catch (err: any) {
+          // Force-close directly in DB if engine fails
+          await db.position.update({
+            where: { id: pos.id },
+            data: { status: 'CLOSED', closedAt: new Date() },
+          });
+          staleClosed++;
+        }
+      }
+    }
+
+    if (staleClosed > 0) {
+      log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones huérfanas cerradas (de sesiones anteriores)`);
+    } else if (stalePositions.length > 0) {
+      log('INFO', `📊 ${stalePositions.length} posiciones abiertas activas (dentro del expiry)`);
+    }
+  } catch (err: any) {
+    log('WARN', `Cleanup error: ${err.message}`);
+  }
 
   // Run first cycle immediately
   log('INFO', '🏃 Ejecutando primer ciclo...');
