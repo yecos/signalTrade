@@ -689,6 +689,9 @@ export default function TradingDashboard() {
   const [twelveDataApiKey, setTwelveDataApiKey] = useState("");
   const [apiKeyLoading, setApiKeyLoading] = useState(false);
 
+  // Market sentiment state (Fear & Greed, Funding, OI, Pressure Score)
+  const [marketSentiment, setMarketSentiment] = useState<any>(null);
+
   // Learning engine state
   const [learningReport, setLearningReport] = useState<any>(null);
 
@@ -775,6 +778,13 @@ export default function TradingDashboard() {
     } catch (err) { console.error("Error fetching market engine status:", err); }
   }, []);
 
+  const fetchMarketSentiment = useCallback(async () => {
+    try {
+      const res = await fetch("/api/market-sentiment");
+      if (res.ok) setMarketSentiment(await res.json());
+    } catch (err) { console.error("Error fetching market sentiment:", err); }
+  }, []);
+
   const fetchLearningReport = useCallback(async () => {
     try {
       const res = await fetch("/api/learning");
@@ -813,9 +823,10 @@ export default function TradingDashboard() {
     fetchAutoTrader();
     fetchSetupScores();
     fetchMarketEngineStatus();
+    fetchMarketSentiment();
     fetchProvenEdges();
     fetchEdgeProfile();
-  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchProvenEdges, fetchEdgeProfile]);
+  }, [fetchStats, fetchAlerts, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchMarketSentiment, fetchProvenEdges, fetchEdgeProfile]);
 
   useEffect(() => { fetchSignals(); }, [fetchSignals]);
 
@@ -837,10 +848,11 @@ export default function TradingDashboard() {
       if (activeTab === "auto-trader" || activeTab === "motor") fetchAutoTrader();
       if (activeTab === "setup-scores") fetchSetupScores();
       if (activeTab === "motor") fetchMarketEngineStatus();
+      if (activeTab === "motor") fetchMarketSentiment();
       if (activeTab === "edges") { fetchProvenEdges(); fetchEdgeProfile(); }
     }, 10000);
     return () => clearInterval(interval);
-  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchProvenEdges, fetchEdgeProfile, activeTab]);
+  }, [fetchStats, fetchAlerts, fetchSignals, fetchAutoTrader, fetchSetupScores, fetchMarketEngineStatus, fetchMarketSentiment, fetchProvenEdges, fetchEdgeProfile, activeTab]);
 
   // Auto check-pending signals every 60 seconds (replaces frequent cron on Vercel Hobby)
   useEffect(() => {
@@ -1403,6 +1415,109 @@ export default function TradingDashboard() {
                   </div>
                 </CardContent>
               </Card>
+
+              {/* Market Sentiment — Fear & Greed, BTC Dominance, Funding, OI */}
+              {marketSentiment && (marketSentiment.macro || Object.keys(marketSentiment.assets || {}).length > 0) && (
+                <Card className="bg-[#111827] border-white/10">
+                  <CardContent className="p-4">
+                    <div className="flex items-center gap-2 mb-3">
+                      <Brain className="size-4 text-[#a855f7]" />
+                      <span className="text-sm font-semibold text-white/80">Market Sentiment</span>
+                      {marketSentiment.lastUpdated && (
+                        <span className="text-[10px] text-white/30 ml-auto">
+                          Actualizado: {new Date(marketSentiment.lastUpdated).toLocaleTimeString()}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                      {/* Fear & Greed Index */}
+                      {marketSentiment.macro && (
+                        <div className="bg-white/5 rounded-lg p-3 text-center">
+                          <div className="text-[10px] text-white/40 mb-1">Fear & Greed</div>
+                          <div className={`text-2xl font-bold ${
+                            marketSentiment.macro.fearGreedIndex >= 60 ? 'text-[#00ff88]' :
+                            marketSentiment.macro.fearGreedIndex <= 40 ? 'text-[#ff3366]' : 'text-[#ffaa00]'
+                          }`}>
+                            {marketSentiment.macro.fearGreedIndex}
+                          </div>
+                          <div className={`text-[10px] font-medium ${
+                            marketSentiment.macro.fearGreedIndex >= 60 ? 'text-[#00ff88]/70' :
+                            marketSentiment.macro.fearGreedIndex <= 40 ? 'text-[#ff3366]/70' : 'text-[#ffaa00]/70'
+                          }`}>
+                            {marketSentiment.macro.fearGreedLabel || 'Neutral'}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* BTC Dominance */}
+                      {marketSentiment.macro && marketSentiment.macro.btcDominance > 0 && (
+                        <div className="bg-white/5 rounded-lg p-3 text-center">
+                          <div className="text-[10px] text-white/40 mb-1">BTC Dominance</div>
+                          <div className="text-2xl font-bold text-[#f7931a]">{marketSentiment.macro.btcDominance.toFixed(1)}%</div>
+                          <div className="text-[10px] text-white/30">Market Cap</div>
+                        </div>
+                      )}
+
+                      {/* Per-Asset Sentiment Cards */}
+                      {Object.entries(marketSentiment.assets || {}).map(([asset, data]: [string, any]) => {
+                        const shortName = asset.split('/')[0];
+                        const isBullish = data.sentiment === 'BULLISH';
+                        const isBearish = data.sentiment === 'BEARISH';
+                        return (
+                          <div key={asset} className="bg-white/5 rounded-lg p-3">
+                            <div className="flex items-center justify-between mb-2">
+                              <span className="text-xs font-semibold text-white/70">{shortName}</span>
+                              <Badge className={`text-[10px] px-1.5 py-0 border ${
+                                isBullish ? 'bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30' :
+                                isBearish ? 'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30' :
+                                'bg-white/10 text-white/50 border-white/20'
+                              }`}>
+                                {isBullish ? '▲' : isBearish ? '▼' : '◆'} {data.sentiment}
+                              </Badge>
+                            </div>
+                            <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                              <div className="flex justify-between">
+                                <span className="text-white/40">Precio</span>
+                                <span className="text-white/70 font-mono">{data.lastPrice?.toLocaleString(undefined, {maximumFractionDigits: 2})}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-white/40">Pressure</span>
+                                <span className={`font-mono font-medium ${
+                                  (data.pressureScore || 0) > 10 ? 'text-[#00ff88]' :
+                                  (data.pressureScore || 0) < -10 ? 'text-[#ff3366]' : 'text-white/50'
+                                }`}>{(data.pressureScore || 0) > 0 ? '+' : ''}{data.pressureScore || 0}</span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-white/40">Funding</span>
+                                <span className={`font-mono ${(data.fundingRate || 0) > 0 ? 'text-[#00ff88]' : 'text-[#ff3366]'}`}>
+                                  {((data.fundingRate || 0) * 100).toFixed(4)}%
+                                </span>
+                              </div>
+                              <div className="flex justify-between">
+                                <span className="text-white/40">OI 1h</span>
+                                <span className={`font-mono ${(data.oiChange1h || 0) > 0 ? 'text-[#00ff88]' : 'text-[#ff3366]'}`}>
+                                  {(data.oiChange1h || 0) > 0 ? '+' : ''}{(data.oiChange1h || 0).toFixed(1)}%
+                                </span>
+                              </div>
+                            </div>
+                            <div className="mt-1.5 flex items-center gap-1.5">
+                              <span className="text-[9px] text-white/30">Liquidez:</span>
+                              <Badge className={`text-[9px] px-1 py-0 border ${
+                                data.liquidityQuality === 'HIGH' ? 'bg-[#00ff88]/15 text-[#00ff88] border-[#00ff88]/30' :
+                                data.liquidityQuality === 'MEDIUM' ? 'bg-[#ffaa00]/15 text-[#ffaa00] border-[#ffaa00]/30' :
+                                'bg-[#ff3366]/15 text-[#ff3366] border-[#ff3366]/30'
+                              }`}>
+                                {data.liquidityQuality || 'N/A'}
+                              </Badge>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </CardContent>
+                </Card>
+              )}
 
               {/* KPI Cards */}
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-7 gap-3">
