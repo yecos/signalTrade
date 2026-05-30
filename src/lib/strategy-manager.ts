@@ -540,9 +540,9 @@ export async function applyPreset(preset: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESS
         ...DEFAULT_STRATEGY_MANAGER_CONFIG,
         enabled: true,
         dryRun: true,
-        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: true },
+        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest
         gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true },
-        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true },
+        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, timeframe: 'H1' }, // H1 proven
         orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true },
       };
       break;
@@ -551,9 +551,9 @@ export async function applyPreset(preset: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESS
         ...DEFAULT_STRATEGY_MANAGER_CONFIG,
         enabled: true,
         dryRun: false,
-        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: true, minFundingRatePct: 0.03 },
-        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: false }, // Conservative: no grid
-        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, minConfidence: 75 },
+        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // Backtest shows no edge
+        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: false }, // Conservative: no grid (risk of range break)
+        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, timeframe: 'H1', assets: ['ETH/USD'], minConfidence: 75 }, // Backtest PROVEN: PF 2.32, WR 62.3%
         orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true },
         maxTotalExposureUsd: 5000,
         maxDailyLossUsd: 200,
@@ -564,9 +564,9 @@ export async function applyPreset(preset: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESS
         ...DEFAULT_STRATEGY_MANAGER_CONFIG,
         enabled: true,
         dryRun: false,
-        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: true },
-        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true, gridLevels: 8 },
-        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, minConfidence: 60 },
+        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // Backtest shows no edge
+        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true, gridLevels: 8, assets: ['ETH/USD'] }, // Backtest: PF 3.17 ETH
+        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, timeframe: 'H1', assets: ['ETH/USD'], minConfidence: 60 }, // Backtest PROVEN
         orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true },
         maxTotalExposureUsd: 10000,
         maxDailyLossUsd: 500,
@@ -577,9 +577,9 @@ export async function applyPreset(preset: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESS
         ...DEFAULT_STRATEGY_MANAGER_CONFIG,
         enabled: true,
         dryRun: false,
-        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: true, minFundingRatePct: 0.005 },
-        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true, gridLevels: 15, gridSpacingPct: 0.3 },
-        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, minConfidence: 45 },
+        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // Backtest shows no edge even aggressive
+        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true, gridLevels: 15, gridSpacingPct: 0.3, assets: ['ETH/USD', 'BTC/USD'] },
+        meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, timeframe: 'H1', assets: ['ETH/USD', 'BTC/USD'], minConfidence: 45 }, // BTC 1h marginal (PF 1.42)
         orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true },
         maxTotalExposureUsd: 20000,
         maxDailyLossUsd: 1000,
