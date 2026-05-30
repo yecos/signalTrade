@@ -18,7 +18,7 @@ import { evaluateSignal, checkAlerts } from '../src/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus, getCandles as getEngineCandles } from '../src/lib/market-engine';
 import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSignal } from '../src/lib/auto-trader';
 import { getExecutionEngine } from '../src/lib/execution-engine';
-import { getBrokerClientFromDB, BybitClient } from '../src/lib/broker-client';
+import { getBrokerClientFromDB, BybitClient, assetToSymbol } from '../src/lib/broker-client';
 import { getOrCreateAccount, updateAccountBalance } from '../src/lib/risk-manager';
 import { feedMarketData, getAllSentiments, getSentimentConfidenceAdjustment, refreshPrices, getMarketSummary } from '../src/lib/market-data-feeder';
 
@@ -500,7 +500,7 @@ async function runCycle(): Promise<void> {
         let closePrice = pos.entryPrice; // fallback
         try {
           const broker = await getBrokerClientFromDB();
-          const symbol = pos.asset.replace('/', '').replace('USD', 'USDT');
+          const symbol = assetToSymbol(pos.asset);
           const lastPrice = await broker.getLastPrice(symbol);
           if (lastPrice) closePrice = lastPrice;
         } catch { /* use entry price */ }
