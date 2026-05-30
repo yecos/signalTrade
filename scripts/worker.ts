@@ -20,7 +20,7 @@ import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSigna
 import { getExecutionEngine } from '../src/lib/execution-engine';
 import { getBrokerClientFromDB, BybitClient } from '../src/lib/broker-client';
 import { getOrCreateAccount, updateAccountBalance } from '../src/lib/risk-manager';
-import { feedMarketData, getAllSentiments, getSentimentConfidenceAdjustment } from '../src/lib/market-data-feeder';
+import { feedMarketData, getAllSentiments, getSentimentConfidenceAdjustment, refreshPrices, getMarketSummary } from '../src/lib/market-data-feeder';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 const WORKER_PORT = parseInt(process.env.WORKER_PORT || '3111');
@@ -634,17 +634,9 @@ async function runCycle(): Promise<void> {
       feedResult.errors.slice(0, 3).forEach(e => log('WARN', `  ⚠ ${e}`));
     }
 
-    // Log sentiment summary
-    const sentiments = getAllSentiments();
-    const sentimentParts: string[] = [];
-    for (const [asset, s] of sentiments) {
-      sentimentParts.push(`${asset}: ${s.sentiment} (FR:${(s.fundingRate * 100).toFixed(4)}% OI:${s.oiChange1h >= 0 ? '+' : ''}${s.oiChange1h.toFixed(1)}% Spread:${s.spreadPct.toFixed(3)}%)`);
-    }
-    if (sentimentParts.length > 0) {
-      log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit, Sentimiento: ${sentimentParts.join(' | ')}`);
-    } else {
-      log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit actualizadas`);
-    }
+    // Log market summary (includes macro + per-asset sentiment)
+    const marketSummary = getMarketSummary();
+    log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit, ${feedResult.sentimentsUpdated} sentimientos | ${marketSummary}`);
   } catch (err: any) {
     log('WARN', `Fase 5: Market data feed error — ${err.message}`);
     // Non-critical, don't count as error
@@ -1009,6 +1001,24 @@ async function main(): Promise<void> {
       monitorRunning = true;
       const engine = getExecutionEngine();
 
+      // Refresh prices from Bybit for accurate SL/TP checking
+      try {
+        const freshPrices = await refreshPrices();
+        if (freshPrices.size > 0) {
+          // Update position mark prices with fresh data
+          const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
+          for (const pos of openPositions) {
+            const freshPrice = freshPrices.get(pos.asset);
+            if (freshPrice && freshPrice > 0) {
+              await db.position.update({
+                where: { id: pos.id },
+                data: { currentPrice: freshPrice },
+              });
+            }
+          }
+        }
+      } catch { /* price refresh is best-effort */ }
+
       // Check SL/TP hits (includes trailing stop + breakeven)
       let closed = await engine.checkStopLossTakeProfit();
 
@@ -1024,7 +1034,7 @@ async function main(): Promise<void> {
         const stalePositions = await db.position.findMany({ where: { status: 'OPEN' } });
         const now = Date.now();
         for (const pos of stalePositions) {
-          const age = now - new Date(pos.createdAt).getTime();
+          const age = now - new Date(pos.openedAt).getTime();
           if (age > MAX_POSITION_AGE_MS) {
             await engine.closePosition(pos.id, `SAFETY TIMEOUT: position open ${Math.round(age / 60000)} min (max 120 min)`);
             closed++;

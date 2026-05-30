@@ -328,9 +328,9 @@ export async function assessRisk(params: {
   // ═══ CHECK 7: COOLDOWN AFTER LOSS ═══
   if (riskState.lastLossTime) {
     const minutesSinceLoss = (Date.now() - riskState.lastLossTime.getTime()) / (1000 * 60);
-    // In data collection mode, reduce cooldown to 5 min (need more trades for statistics)
+    // In data collection mode, reduce cooldown to 1 min (need more trades for statistics)
     const effectiveCooldown = params.dataCollectionMode
-      ? Math.min(config.cooldownAfterLoss, 5)
+      ? Math.min(config.cooldownAfterLoss, 1)
       : config.cooldownAfterLoss;
     if (minutesSinceLoss < effectiveCooldown) {
       const remaining = Math.ceil(effectiveCooldown - minutesSinceLoss);

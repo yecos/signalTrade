@@ -851,16 +851,40 @@ export async function generateAutoSignal(
     }
   }
   
-  // ═══ Step 8.5: Market Sentiment Adjustment ═══
-  // Use Bybit data (funding rate, OI, orderbook) to adjust confidence
+  // ═══ Step 8.5: Market Sentiment Adjustment (v2 — con datos macro) ═══
+  // Use Bybit data (funding, OI, orderbook) + CoinGecko macro (Fear&Greed, BTCDom)
   if (direction !== 'NO_OPERAR') {
     try {
-      const { getSentimentConfidenceAdjustment } = await import('./market-data-feeder');
+      const { getSentimentConfidenceAdjustment, getSentiment, getMacroData } = await import('./market-data-feeder');
       const sentimentAdj = getSentimentConfidenceAdjustment(asset, direction);
       if (sentimentAdj !== 0) {
         const oldConf = confidence;
         confidence = Math.min(100, Math.max(0, confidence + sentimentAdj));
         reason += ` [Sentiment: ${sentimentAdj > 0 ? '+' : ''}${sentimentAdj}% → ${confidence.toFixed(0)}%]`;
+      }
+
+      // Macro context: Add Fear & Greed info to reason for transparency
+      const macro = getMacroData();
+      const sent = getSentiment(asset);
+      if (macro && sent) {
+        const macroInfo: string[] = [];
+        if (macro.fearGreedIndex <= 25) macroInfo.push(`FGI:${macro.fearGreedIndex}(Fear)`);
+        else if (macro.fearGreedIndex >= 75) macroInfo.push(`FGI:${macro.fearGreedIndex}(Greed)`);
+        if (sent.pressureScore > 30) macroInfo.push(`Pressure:${sent.pressureScore.toFixed(0)}`);
+        else if (sent.pressureScore < -30) macroInfo.push(`Pressure:${sent.pressureScore.toFixed(0)}`);
+        if (macroInfo.length > 0) reason += ` [Macro: ${macroInfo.join(', ')}]`;
+      }
+
+      // Extra filter: In Extreme Fear (FGI < 15), reduce confidence for LOWER signals
+      // (contrarian: extreme fear often means bottom is near)
+      if (macro && macro.fearGreedIndex < 15 && direction === 'LOWER') {
+        confidence = Math.max(0, confidence - 5);
+        reason += ' [Extreme Fear→LOWER penalty -5%]';
+      }
+      // Extra filter: In Extreme Greed (FGI > 85), reduce confidence for HIGHER signals
+      if (macro && macro.fearGreedIndex > 85 && direction === 'HIGHER') {
+        confidence = Math.max(0, confidence - 5);
+        reason += ' [Extreme Greed→HIGHER penalty -5%]';
       }
     } catch { /* sentiment data not available yet, skip */ }
   }
