@@ -12,8 +12,9 @@
 // ══════════════════════════════════════════════════════════════════════════════
 
 import { config } from 'dotenv';
-config({ path: '../.env' });
-config({ path: '.env' });
+import { resolve } from 'path';
+config({ path: resolve(__dirname, '..', '.env') });
+config({ path: resolve(__dirname, '.env') });
 
 import { computeAllIndicators } from '../src/lib/indicators';
 import { detectRegime } from '../src/lib/regime-engine';
@@ -108,7 +109,7 @@ async function fetchFundingHistory(symbol: string, limit: number = 500): Promise
     return data.result.list.map((item: any) => ({
       fundingRate: parseFloat(item.fundingRate),
       fundingTime: parseInt(item.fundingRateTimestamp) * 1000,
-      markPrice: parseFloat(item.fundingRateTimestamp), // Not available in this endpoint
+      markPrice: 0, // Not available in this endpoint
     }));
   } catch (err: any) {
     console.error(`Error fetching funding history: ${err.message}`);

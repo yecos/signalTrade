@@ -137,7 +137,7 @@ export async function scanFundingOpportunities(config?: Partial<FundingArbConfig
   for (const asset of cfg.assets) {
     try {
       const symbol = assetToSymbol(asset);
-      const spotSymbol = asset.replace('/', 'USDT'); // e.g., BTCUSDT for spot
+      const spotSymbol = asset.replace('/USD', 'USDT').replace('/USDT', 'USDT'); // BTC/USD → BTCUSDT
 
       // Fetch current ticker (has funding rate)
       const ticker = await client.getTicker(symbol, 'linear');
@@ -246,7 +246,7 @@ export async function openFundingArbPosition(
   const cfg = { ...DEFAULT_FUNDING_ARB_CONFIG, ...config };
   const client = await getBybitClient();
   const symbol = assetToSymbol(asset);
-  const spotSymbol = asset.replace('/', 'USDT');
+  const spotSymbol = asset.replace('/USD', 'USDT').replace('/USDT', 'USDT'); // BTC/USD → BTCUSDT
 
   try {
     // Get current funding rate
@@ -391,7 +391,7 @@ export async function closeFundingArbPosition(
 
   const client = await getBybitClient();
   const symbol = assetToSymbol(asset);
-  const spotSymbol = asset.replace('/', 'USDT');
+  const spotSymbol = asset.replace('/USD', 'USDT').replace('/USDT', 'USDT'); // BTC/USD → BTCUSDT
 
   try {
     position.status = 'CLOSING';
@@ -462,7 +462,7 @@ export async function monitorFundingArbPositions(config?: Partial<FundingArbConf
 
     try {
       const symbol = assetToSymbol(asset);
-      const spotSymbol = asset.replace('/', 'USDT');
+      const spotSymbol = asset.replace('/USD', 'USDT').replace('/USDT', 'USDT'); // BTC/USD → BTCUSDT
 
       // Get current prices
       const [perpTicker, spotTicker] = await Promise.all([
