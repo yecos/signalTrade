@@ -462,8 +462,9 @@ export class ExecutionEngine {
     return closed;
   }
 
-  // === CHECK AND CLOSE SL/TP HITS ===
+  // === CHECK AND CLOSE SL/TP HITS + TRAILING STOP + BREAKEVEN ===
   // Called by the worker/cron to check if SL/TP has been hit
+  // Also implements trailing stop and breakeven logic
 
   async checkStopLossTakeProfit(): Promise<number> {
     const openPositions = await db.position.findMany({
@@ -494,25 +495,68 @@ export class ExecutionEngine {
         ? (unrealizedPnl / (pos.entryPrice * pos.quantity)) * 100
         : 0;
 
+      // ═══ TRAILING STOP + BREAKEVEN LOGIC ═══
+      let updatedStopLoss = pos.stopLoss;
+      const entryPrice = pos.entryPrice;
+      const slDistance = Math.abs(entryPrice - pos.stopLoss);
+      const isBuy = pos.direction === 'BUY';
+      const favorableMove = isBuy
+        ? (currentPrice - entryPrice) / entryPrice
+        : (entryPrice - currentPrice) / entryPrice;
+
+      // BREAKEVEN: When price moves 1R in our favor, move stop to entry (risk-free trade)
+      if (favorableMove >= slDistance / entryPrice && updatedStopLoss !== entryPrice) {
+        if (isBuy && updatedStopLoss < entryPrice) {
+          updatedStopLoss = entryPrice;
+          console.log(`[EXEC] 🔒 BREAKEVEN: ${pos.asset} BUY — SL moved from ${pos.stopLoss} to entry ${entryPrice}`);
+        } else if (!isBuy && updatedStopLoss > entryPrice) {
+          updatedStopLoss = entryPrice;
+          console.log(`[EXEC] 🔒 BREAKEVEN: ${pos.asset} SELL — SL moved from ${pos.stopLoss} to entry ${entryPrice}`);
+        }
+      }
+
+      // TRAILING STOP: After breakeven, trail SL at 50% of favorable move
+      if (updatedStopLoss === entryPrice && favorableMove > slDistance / entryPrice) {
+        const trailDistance = favorableMove * entryPrice * 0.5; // 50% of favorable move
+        const newTrailingStop = isBuy
+          ? entryPrice + trailDistance
+          : entryPrice - trailDistance;
+
+        // Only move stop in favorable direction (never backward)
+        if (isBuy && newTrailingStop > updatedStopLoss) {
+          updatedStopLoss = newTrailingStop;
+          console.log(`[EXEC] 📈 TRAILING: ${pos.asset} BUY — SL trailed to ${newTrailingStop.toFixed(2)} (price: ${currentPrice.toFixed(2)})`);
+        } else if (!isBuy && newTrailingStop < updatedStopLoss) {
+          updatedStopLoss = newTrailingStop;
+          console.log(`[EXEC] 📉 TRAILING: ${pos.asset} SELL — SL trailed to ${newTrailingStop.toFixed(2)} (price: ${currentPrice.toFixed(2)})`);
+        }
+      }
+
       await db.position.update({
         where: { id: pos.id },
         data: {
           currentPrice,
           unrealizedPnl,
           unrealizedPnlPct,
+          stopLoss: updatedStopLoss, // Update SL with breakeven/trailing
           maxFavorable: Math.max(pos.maxFavorable || 0, unrealizedPnl),
           maxAdverse: Math.min(pos.maxAdverse || 0, unrealizedPnl),
         },
       });
 
-      // Check stop loss hit
-      if (pos.stopLoss) {
-        const slHit = pos.direction === 'BUY'
-          ? currentPrice <= pos.stopLoss
-          : currentPrice >= pos.stopLoss;
+      // Check stop loss hit (with updated breakeven/trailing stop)
+      if (updatedStopLoss) {
+        const slHit = isBuy
+          ? currentPrice <= updatedStopLoss
+          : currentPrice >= updatedStopLoss;
 
         if (slHit) {
-          await this.closePosition(pos.id, `STOP LOSS HIT: ${pos.stopLoss}`);
+          const reason = updatedStopLoss === entryPrice
+            ? `BREAKEVEN HIT: ${updatedStopLoss} (risk-free exit)`
+            : favorableMove > slDistance / entryPrice
+              ? `TRAILING STOP HIT: ${updatedStopLoss.toFixed(2)}`
+              : `STOP LOSS HIT: ${updatedStopLoss}`;
+          await this.closePosition(pos.id, reason);
           closed++;
           continue;
         }

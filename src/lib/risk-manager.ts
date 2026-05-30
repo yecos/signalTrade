@@ -295,10 +295,14 @@ export async function assessRisk(params: {
 
   // ═══ CHECK 5: MAX OPEN POSITIONS ═══
   const openPositions = await db.position.count({ where: { status: 'OPEN' } });
-  if (openPositions >= config.maxOpenPositions) {
+  // In data collection mode, allow up to 10 positions (need more trades for statistics)
+  const effectiveMaxPositions = params.dataCollectionMode
+    ? Math.max(config.maxOpenPositions, 10)
+    : config.maxOpenPositions;
+  if (openPositions >= effectiveMaxPositions) {
     return {
       allowed: false,
-      reason: `Máximo de posiciones abiertas alcanzado: ${openPositions}/${config.maxOpenPositions}`,
+      reason: `Máximo de posiciones abiertas alcanzado: ${openPositions}/${effectiveMaxPositions}${params.dataCollectionMode ? ' (modo recolección)' : ''}`,
       positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
       stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
       riskRewardRatio: 0, warnings, circuitBreaker: false,
@@ -324,11 +328,15 @@ export async function assessRisk(params: {
   // ═══ CHECK 7: COOLDOWN AFTER LOSS ═══
   if (riskState.lastLossTime) {
     const minutesSinceLoss = (Date.now() - riskState.lastLossTime.getTime()) / (1000 * 60);
-    if (minutesSinceLoss < config.cooldownAfterLoss) {
-      const remaining = Math.ceil(config.cooldownAfterLoss - minutesSinceLoss);
+    // In data collection mode, reduce cooldown to 5 min (need more trades for statistics)
+    const effectiveCooldown = params.dataCollectionMode
+      ? Math.min(config.cooldownAfterLoss, 5)
+      : config.cooldownAfterLoss;
+    if (minutesSinceLoss < effectiveCooldown) {
+      const remaining = Math.ceil(effectiveCooldown - minutesSinceLoss);
       return {
         allowed: false,
-        reason: `Cooldown post-pérdida: ${remaining} min restantes (última pérdida: ${riskState.consecutiveLosses} consecutivas)`,
+        reason: `Cooldown post-pérdida: ${remaining} min restantes (última pérdida: ${riskState.consecutiveLosses} consecutivas)${params.dataCollectionMode ? ' — reducido en modo recolección' : ''}`,
         positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
         stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
         riskRewardRatio: 0, warnings, circuitBreaker: false,

@@ -273,6 +273,21 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     config.maxConcurrentSignals = 50;
   }
 
+  // ═══ Force maxOpenPositions to 10 in data collection mode ═══
+  // The DB default is 3, which is too low for building statistics
+  try {
+    const account = await getOrCreateAccount();
+    if (account.maxOpenPositions < 10) {
+      await db.account.update({
+        where: { id: account.id },
+        data: { maxOpenPositions: 10 },
+      });
+      log('INFO', `⚙️ maxOpenPositions actualizado: ${account.maxOpenPositions} → 10 (modo recolección)`);
+    }
+  } catch (err: any) {
+    log('WARN', `Could not update maxOpenPositions: ${err.message}`);
+  }
+
   const result = await runAutoTraderCycle(config);
 
   // Update last check time
@@ -456,7 +471,7 @@ async function runCycle(): Promise<void> {
   const startTime = Date.now();
   log('CYCLE', '═══ Inicio de ciclo ═══');
 
-  // ═══ CLEANUP: Close positions with unrealistic SL/TP (>5% from entry) ═══
+  // ═══ CLEANUP: Close positions with unrealistic SL/TP (>1.5% from entry) ═══
   // These were created before the SL/TP cap fix and will never close properly
   try {
     const badPositions = await db.position.findMany({ where: { status: 'OPEN' } });
@@ -464,8 +479,11 @@ async function runCycle(): Promise<void> {
     for (const pos of badPositions) {
       const entry = pos.entryPrice;
       if (!entry || entry === 0) continue;
+      const isCrypto = pos.asset.includes('BTC') || pos.asset.includes('ETH');
+      const maxPct = isCrypto ? 0.015 : 0.01; // 1.5% for crypto, 1% for forex
       const slPct = pos.stopLoss ? Math.abs(entry - pos.stopLoss) / entry : 0;
-      if (slPct > 0.05) { // SL more than 5% away = unrealistic for M5
+      const tpPct = pos.takeProfit ? Math.abs(entry - pos.takeProfit) / entry : 0;
+      if (slPct > maxPct || tpPct > maxPct * 2) { // SL too wide OR TP too wide
         toClose.push(pos.id);
       }
     }
@@ -520,7 +538,7 @@ async function runCycle(): Promise<void> {
           });
         }
       }
-      log('INFO', `🧹 Closed ${toClose.length} positions with unrealistic SL/TP (>5% from entry)`);
+      log('INFO', `🧹 Closed ${toClose.length} positions with unrealistic SL/TP (>1.5% SL / >3% TP from entry)`);
     }
   } catch (cleanupErr: any) {
     log('WARN', `Position cleanup failed: ${cleanupErr.message}`);
@@ -946,8 +964,35 @@ async function main(): Promise<void> {
   log('INFO', '🏃 Ejecutando primer ciclo...');
   await runCycle();
 
+  // ═══ MID-CYCLE SL/TP MONITORING ═══
+  // Check SL/TP every 60 seconds between full cycles
+  // This is critical for M5 trading with tight stops (0.5-0.8%)
+  const MONITOR_INTERVAL_MS = 60000; // 1 minute
+  let monitorRunning = false;
+
+  setInterval(async () => {
+    if (monitorRunning || state.isRunning) return; // Don't overlap with full cycle
+    try {
+      const openCount = await db.position.count({ where: { status: 'OPEN' } });
+      if (openCount === 0) return; // Nothing to monitor
+
+      monitorRunning = true;
+      const engine = getExecutionEngine();
+      const closed = await engine.checkStopLossTakeProfit();
+      if (closed > 0) {
+        state.totalPositionsClosedSLTP += closed;
+        log('INFO', `🔴 [MONITOR] ${closed} position(s) closed by SL/TP (mid-cycle check)`);
+      }
+      monitorRunning = false;
+    } catch (err: any) {
+      monitorRunning = false;
+      // Silently ignore monitoring errors — don't spam logs
+    }
+  }, MONITOR_INTERVAL_MS);
+
   // Schedule recurring cycles
   log('INFO', `⏰ Próximo ciclo en ${CYCLE_INTERVAL_MS / 1000}s (${CYCLE_INTERVAL_MS / 60000} minutos)`);
+  log('INFO', `👁️ Monitoreo SL/TP cada ${MONITOR_INTERVAL_MS / 1000}s (entre ciclos)`);
   setInterval(async () => {
     try {
       await runCycle();
