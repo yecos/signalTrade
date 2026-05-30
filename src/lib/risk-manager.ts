@@ -115,8 +115,22 @@ export function calculateStopLossTakeProfit(
   riskAmount: number;
   stopDistance: number;
 } {
-  // Stop loss distance: 1.5x ATR (proven to be optimal for most setups)
-  const stopDistance = atr * 1.5;
+  // ═══ Stop loss distance calculation ═══
+  // For M5 timeframe with 40-min expiration, we need TIGHT stops.
+  // Use ATR * 1.5 but CAP to a max percentage of entry price.
+  // This prevents unrealistic SL/TP when ATR is from simulated data.
+
+  // Max SL as % of entry price for different asset types
+  const isCrypto = entryPrice > 1000; // BTC, ETH
+  const maxSlPercent = isCrypto ? 0.008 : 0.005; // 0.8% for crypto, 0.5% for forex
+  const minSlPercent = isCrypto ? 0.002 : 0.001; // 0.2% for crypto, 0.1% for forex
+
+  let stopDistance = atr * 1.5;
+
+  // Cap stop distance to min/max percentage of entry price
+  const maxDistance = entryPrice * maxSlPercent;
+  const minDistance = entryPrice * minSlPercent;
+  stopDistance = Math.max(minDistance, Math.min(stopDistance, maxDistance));
 
   // Risk amount in USD
   const riskAmount = accountBalance * (riskPerTrade / 100);

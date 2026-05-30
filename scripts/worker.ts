@@ -456,6 +456,76 @@ async function runCycle(): Promise<void> {
   const startTime = Date.now();
   log('CYCLE', '═══ Inicio de ciclo ═══');
 
+  // ═══ CLEANUP: Close positions with unrealistic SL/TP (>5% from entry) ═══
+  // These were created before the SL/TP cap fix and will never close properly
+  try {
+    const badPositions = await db.position.findMany({ where: { status: 'OPEN' } });
+    const toClose: string[] = [];
+    for (const pos of badPositions) {
+      const entry = pos.entryPrice;
+      if (!entry || entry === 0) continue;
+      const slPct = pos.stopLoss ? Math.abs(entry - pos.stopLoss) / entry : 0;
+      if (slPct > 0.05) { // SL more than 5% away = unrealistic for M5
+        toClose.push(pos.id);
+      }
+    }
+    if (toClose.length > 0) {
+      // Close positions and their trades
+      for (const posId of toClose) {
+        const pos = await db.position.findUnique({ where: { id: posId } });
+        if (!pos) continue;
+        // Get real price for P&L
+        let closePrice = pos.entryPrice; // fallback
+        try {
+          const broker = await getBrokerClientFromDB();
+          const symbol = pos.asset.replace('/', '').replace('USD', 'USDT');
+          const lastPrice = await broker.getLastPrice(symbol);
+          if (lastPrice) closePrice = lastPrice;
+        } catch { /* use entry price */ }
+
+        await db.position.update({
+          where: { id: posId },
+          data: { status: 'CLOSED', currentPrice: closePrice, unrealizedPnl: 0, closedAt: new Date() },
+        });
+        // Close linked trade
+        if (pos.tradeId) {
+          const pnl = pos.direction === 'BUY'
+            ? (closePrice - pos.entryPrice) * pos.quantity
+            : (pos.entryPrice - closePrice) * pos.quantity;
+          await db.trade.update({
+            where: { id: pos.tradeId },
+            data: {
+              status: 'CLOSED',
+              exitPrice: closePrice,
+              realizedPnl: pnl,
+              realizedPnlPct: pos.entryPrice > 0 ? (pnl / (pos.entryPrice * pos.quantity)) * 100 : 0,
+              closedAt: new Date(),
+            },
+          });
+        }
+        // Close linked signal
+        const trade = pos.tradeId ? await db.trade.findUnique({ where: { id: pos.tradeId } }) : null;
+        if (trade?.signalId) {
+          const pnl = pos.direction === 'BUY'
+            ? (closePrice - pos.entryPrice) * pos.quantity
+            : (pos.entryPrice - closePrice) * pos.quantity;
+          await db.signal.update({
+            where: { id: trade.signalId },
+            data: {
+              status: 'CLOSED',
+              exitPrice: closePrice,
+              result: pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'DRAW',
+              verificationMethod: 'BAD_SLTP_CLEANUP',
+            },
+          });
+        }
+      }
+      log('INFO', `🧹 Closed ${toClose.length} positions with unrealistic SL/TP (>5% from entry)`);
+    }
+  } catch (cleanupErr: any) {
+    log('WARN', `Position cleanup failed: ${cleanupErr.message}`);
+  }
+
   let generated = 0;
   let verified = 0;
   let errors = 0;

@@ -474,16 +474,14 @@ export class ExecutionEngine {
     let closed = 0;
 
     for (const pos of openPositions) {
-      // Get current price
+      // Get current price — ALWAYS try to get real price, even in PAPER mode
       const symbol = assetToSymbol(pos.asset);
       let currentPrice = pos.currentPrice || pos.entryPrice;
 
-      if (this.mode === 'LIVE' && isCryptoAsset(pos.asset)) {
-        try {
-          const lastPrice = await broker.getLastPrice(symbol);
-          if (lastPrice) currentPrice = lastPrice;
-        } catch { /* use current */ }
-      }
+      try {
+        const lastPrice = await broker.getLastPrice(symbol);
+        if (lastPrice) currentPrice = lastPrice;
+      } catch { /* use last known price */ }
 
       // Update mark price
       let unrealizedPnl: number;

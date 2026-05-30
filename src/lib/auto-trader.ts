@@ -1540,14 +1540,17 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
           const { getExecutionEngine } = await import('./execution-engine');
           const engine = getExecutionEngine(autoExecution.mode);
 
-          // Get ATR from indicators
-          const atr = result.indicators?.atr14 || (result.indicators?.sma20 || 0) * 0.005;
+          // Get ATR from indicators — cap to max 1% of entry price for M5 timeframe
+          const rawAtr = result.indicators?.atr14 || 0;
+          const estimatedPrice = result.indicators?.sma20 || 0;
+          const maxAtrForM5 = estimatedPrice * 0.005; // max 0.5% for M5
+          const atr = Math.max(estimatedPrice * 0.001, Math.min(rawAtr, maxAtrForM5));
 
           const execResult = await engine.executeSignal({
             signalId: result.signalId,
             asset: result.asset,
             direction: result.direction as 'HIGHER' | 'LOWER',
-            entryPrice: result.indicators?.sma20 || 0, // Will be overridden by live price
+            entryPrice: estimatedPrice || 0, // SMA20 as estimate — broker will use live price
             confidence: result.confidence,
             patternType: result.pattern,
             sessionType: result.session,
