@@ -21,6 +21,7 @@ import { computeAllIndicators, type IndicatorSnapshot } from './indicators';
 import { getCandles as getDBCandles } from './market-data';
 import { detectRegime, type RegimeResult } from './regime-engine';
 import { detectSession, type SessionType } from './sessions';
+import { getAIAdjustedConfig, recordWalkForwardTrade, loadAIAnalyzerState, type MeanReversionAdjustments } from './ai-market-analyzer';
 
 // === TYPES ===
 
@@ -165,6 +166,33 @@ export async function generateMeanReversionSignal(
 ): Promise<MeanReversionSignal> {
   const cfg = { ...DEFAULT_MEAN_REVERSION_CONFIG, ...config };
 
+  // ═══ AI-ADAPTIVE PARAMETERS ═══
+  // Get AI-adjusted parameters (cached, calls LLM every 30 min)
+  let aiAdjustments: MeanReversionAdjustments | null = null;
+  let aiShouldTrade = true;
+  let aiPositionSizeMultiplier = 1.0;
+
+  try {
+    const aiConfig = await getAIAdjustedConfig();
+    aiAdjustments = aiConfig.adjustments;
+    aiShouldTrade = aiConfig.shouldTrade;
+    aiPositionSizeMultiplier = aiConfig.positionSizeMultiplier;
+
+    // Apply AI adjustments to config (override defaults)
+    if (aiAdjustments) {
+      cfg.rsiOversold = aiAdjustments.rsiOversold.value;
+      cfg.rsiOverbought = aiAdjustments.rsiOverbought.value;
+      cfg.adxMaxRange = aiAdjustments.adxMaxRange.value;
+      cfg.volumeConfirmMin = aiAdjustments.volumeConfirmMin.value;
+      cfg.stopLossATRMultiplier = aiAdjustments.stopLossATRMultiplier.value;
+      cfg.trailingATRMultiplier = aiAdjustments.trailingATRMultiplier.value;
+      cfg.minConfidence = aiAdjustments.minConfidence.value;
+    }
+  } catch (err: any) {
+    console.warn(`[MEAN-REV] AI adjustments unavailable: ${err.message}. Using backtest-proven defaults.`);
+    // Continue with backtest-proven defaults — this is safe
+  }
+
   // Default NO_TRADE signal
   const noTrade: MeanReversionSignal = {
     asset,
@@ -248,6 +276,12 @@ export async function generateMeanReversionSignal(
       isHighQuality: false,
       setupType: 'POOR',
     };
+
+    // ═══ FILTER 0: AI Should-Trade Check ═══
+    if (!aiShouldTrade) {
+      signal.reason = `IA recomienda NO operar: ${aiAdjustments ? 'ajustes disponibles pero riesgo alto' : 'análisis no disponible'}`;
+      return signal;
+    }
 
     // ═══ FILTER 1: Session Check ═══
     if (!cfg.allowedSessions.includes(sessionInfo.session)) {
@@ -351,7 +385,8 @@ export async function generateMeanReversionSignal(
 
 export async function executeMeanReversionTrade(
   signal: MeanReversionSignal,
-  config?: Partial<MeanReversionConfig>
+  config?: Partial<MeanReversionConfig>,
+  aiPositionSizeMultiplier?: number
 ): Promise<MeanReversionPosition | null> {
   const cfg = { ...DEFAULT_MEAN_REVERSION_CONFIG, ...config };
 
@@ -374,8 +409,9 @@ export async function executeMeanReversionTrade(
   const symbol = assetToSymbol(signal.asset);
 
   try {
-    // Calculate quantity
-    const quantity = Math.max(0.001, cfg.maxPositionSizeUsd / signal.entryPrice);
+    // Calculate quantity with AI position size multiplier
+    const effectiveSize = cfg.maxPositionSizeUsd * (aiPositionSizeMultiplier || 1.0);
+    const quantity = Math.max(0.001, effectiveSize / signal.entryPrice);
 
     // Place order
     const side = signal.direction === 'HIGHER' ? 'Buy' : 'Sell';
@@ -445,7 +481,7 @@ export async function executeMeanReversionTrade(
       2, 500, 'mean-reversion-signal'
     );
 
-    console.log(`[MEAN-REV] Opened ${signal.direction} ${signal.asset} @ $${signal.entryPrice} | SL: $${signal.stopLoss} | TP: $${signal.takeProfit} | R:R ${signal.riskReward.toFixed(2)} | Confidence: ${signal.confidence}%`);
+    console.log(`[MEAN-REV] Opened ${signal.direction} ${signal.asset} @ $${signal.entryPrice} | SL: $${signal.stopLoss} | TP: $${signal.takeProfit} | R:R ${signal.riskReward.toFixed(2)} | Confidence: ${signal.confidence}% | Size: ${(aiPositionSizeMultiplier || 1.0) * 100}%`);
     return position;
   } catch (err: any) {
     console.error(`[MEAN-REV] Error executing trade: ${err.message}`);
@@ -572,6 +608,16 @@ export async function monitorMeanReversionPositions(config?: Partial<MeanReversi
 
         await persistMRPosition(position);
         console.log(`[MEAN-REV] Closed ${position.direction} ${asset}: ${position.closeReason} | P&L: $${position.realizedPnl.toFixed(2)}`);
+
+        // ═══ RECORD WALK-FORWARD TRADE FOR AI ANALYZER ═══
+        try {
+          recordWalkForwardTrade(
+            asset,
+            position.direction,
+            position.realizedPnl > 0 ? 'WIN' : 'LOSS',
+            position.realizedPnl
+          );
+        } catch { /* non-critical */ }
       } else {
         positionsChecked++;
         await persistMRPosition(position);
@@ -604,6 +650,14 @@ export async function executeMeanReversionCycle(config?: Partial<MeanReversionCo
   let tradesOpened = 0;
   const errors: string[] = [];
 
+  // Get AI position size multiplier for this cycle
+  let aiPositionSizeMultiplier = 1.0;
+  try {
+    const { getAIAdjustedConfig } = await import('./ai-market-analyzer');
+    const aiConfig = await getAIAdjustedConfig();
+    aiPositionSizeMultiplier = aiConfig.positionSizeMultiplier;
+  } catch { /* use default */ }
+
   // Generate signals for all configured assets
   for (const asset of cfg.assets) {
     try {
@@ -611,7 +665,7 @@ export async function executeMeanReversionCycle(config?: Partial<MeanReversionCo
       signalsGenerated++;
 
       if (signal.direction !== 'NO_TRADE' && signal.confidence >= cfg.minConfidence) {
-        const position = await executeMeanReversionTrade(signal, cfg);
+        const position = await executeMeanReversionTrade(signal, cfg, aiPositionSizeMultiplier);
         if (position) tradesOpened++;
       }
     } catch (err: any) {

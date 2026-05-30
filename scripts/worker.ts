@@ -214,23 +214,29 @@ async function verifyPendingSignals(): Promise<{ closed: number; verified: numbe
 }
 
 // ─── Phase 2: Run auto-trader cycle ─────────────────────────────────────────
+// ═══ DISABLED: Old pattern-based auto-trader (v7) has NO EDGE ═══
+// Backtests v3-v7 proved pattern strategies (liq_sweep, fakeout, breakout, etc.)
+// have 25-34% WR and -91% to -100% returns. DISABLED permanently.
+// Only the Strategy Manager (Phase 6) with Mean Reversion generates signals.
+// This function is kept ONLY for: cleanup of orphaned signals + position limit sync.
 async function runAutoTrader(): Promise<{ generated: number; skipped: number; errors: string[] }> {
-  // Check if auto-trader is enabled in DB settings
-  const runningSetting = await withRetry(
-    () => db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } }),
-    3, 1000, 'autoTrader-running'
-  );
-  state.autoTraderEnabled = runningSetting?.value === 'true';
+  // ═══ PERMANENTLY DISABLE pattern-based auto-trader ═══
+  // Set the flag to false regardless of DB setting
+  state.autoTraderEnabled = false;
 
-  if (!state.autoTraderEnabled) {
-    return { generated: 0, skipped: 0, errors: ['Auto-Trader desactivado'] };
-  }
+  // Ensure DB also reflects this
+  try {
+    await withRetry(
+      () => db.appSettings.upsert({
+        where: { key: 'autoTraderRunning' },
+        create: { key: 'autoTraderRunning', value: 'false', description: 'Pattern-based auto-trader PERMANENTLY DISABLED (no edge)' },
+        update: { value: 'false' },
+      }),
+      2, 500, 'autoTrader-disable'
+    );
+  } catch { /* best effort */ }
 
-  const configSetting = await withRetry(
-    () => db.appSettings.findUnique({ where: { key: 'autoTraderConfig' } }),
-    3, 1000, 'autoTrader-config'
-  );
-  const config = configSetting ? JSON.parse(configSetting.value) : DEFAULT_CONFIG;
+  const config = DEFAULT_CONFIG;
 
   // ═══ CLEANUP: Close orphaned PENDING signals (no open Position/Trade) ═══
   // These accumulate when Risk Manager rejects trades but signals stay PENDING
@@ -271,10 +277,12 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     log('WARN', `Signal cleanup failed: ${cleanupErr.message}`);
   }
 
-  // Override maxConcurrentSignals from DB config to 50
-  if (config.maxConcurrentSignals && config.maxConcurrentSignals < 50) {
-    config.maxConcurrentSignals = 50;
-  }
+  // ═══ SKIP runAutoTraderCycle — pattern strategies have NO EDGE ═══
+  // The old auto-trader cycle generated signals from: breakout, liq_sweep,
+  // engulfing, fakeout, reversal, trend_continuation, momentum_shift
+  // ALL of these have been backtested and proven unprofitable.
+  // Only Mean Reversion ETHUSDT 1H has proven edge (PF 2.32, WR 62.3%).
+  // That runs in Phase 6 (Strategy Manager).
 
   // ═══ Sync position limit to BOTH account table AND riskConfig ═══
   // BUG FIX: Previously only updated account.maxOpenPositions, but the risk
@@ -320,7 +328,9 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     log('WARN', `Could not sync position limit: ${err.message}`);
   }
 
-  const result = await runAutoTraderCycle(config);
+  // ═══ CLEANUP ONLY: Close orphaned PENDING signals from old auto-trader ═══
+  // These accumulate when the old system generated signals that were never executed
+  log('INFO', '  🚫 Auto-trader viejo DESACTIVADO (patrones sin edge). Solo Strategy Manager genera señales.');
 
   // Update last check time
   await withRetry(
@@ -332,7 +342,7 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     2, 500, 'autoTrader-lastCheck'
   );
 
-  return { generated: result.signalsGenerated, skipped: result.signalsSkipped, errors: result.errors };
+  return { generated: 0, skipped: 0, errors: ['Auto-trader viejo DESACTIVADO permanentemente (patrones sin edge)'] };
 }
 
 // ─── Phase 2.5: Monitor open positions (SL/TP hits + expiration) ───────────
@@ -673,8 +683,9 @@ async function runCycle(): Promise<void> {
 
   // ═══ Phase 6: NEW STRATEGY ENGINE (v8) ═══
   // Funding Arb + Grid Trading + Mean Reversion + Order Flow
+  // + AI Market Analyzer for adaptive parameter adjustment
   try {
-    log('CYCLE', 'Fase 6: Strategy Manager (nuevas estrategias)...');
+    log('CYCLE', 'Fase 6: Strategy Manager (Mean Reversion + IA adaptativa)...');
     const { executeStrategyCycle, getStrategyManagerConfig } = await import('../src/lib/strategy-manager');
     const strategyConfig = getStrategyManagerConfig();
 
@@ -698,6 +709,40 @@ async function runCycle(): Promise<void> {
       // Log recommendations
       for (const rec of strategyResult.strategyRecommendations) {
         log('INFO', `  💡 ${rec}`);
+      }
+
+      // ═══ Log AI Market Analyzer Status ═══
+      try {
+        const { getCachedAnalysis } = await import('../src/lib/ai-market-analyzer');
+        const aiAnalysis = getCachedAnalysis();
+        if (aiAnalysis) {
+          log('INFO', `  🤖 IA: Régimen ${aiAnalysis.aiRegime} (${aiAnalysis.aiRegimeConfidence}%) | Riesgo ${aiAnalysis.riskLevel} | Size ${aiAnalysis.positionSizeMultiplier * 100}% | ${aiAnalysis.shouldTrade ? 'OPERAR' : 'NO operar'}`);
+          if (aiAnalysis.walkForwardValid) {
+            log('INFO', `  📊 Walk-Forward: WR ${aiAnalysis.walkForwardWinRate.toFixed(1)}%, PF ${aiAnalysis.walkForwardProfitFactor.toFixed(2)} — Edge válido`);
+          } else {
+            log('WARN', `  ⚠️ Walk-Forward: WR ${aiAnalysis.walkForwardWinRate.toFixed(1)}%, PF ${aiAnalysis.walkForwardProfitFactor.toFixed(2)} — Edge CUESTIONABLE`);
+          }
+          if (aiAnalysis.detectedEvents.length > 0) {
+            for (const evt of aiAnalysis.detectedEvents) {
+              log('INFO', `  📰 Evento: ${evt.type} (${evt.impact}) — ${evt.description}`);
+            }
+          }
+          // Log AI parameter adjustments if different from defaults
+          const adj = aiAnalysis.suggestedAdjustments;
+          const changes: string[] = [];
+          if (adj.rsiOversold.value !== 30) changes.push(`RSI=${adj.rsiOversold.value}`);
+          if (adj.adxMaxRange.value !== 25) changes.push(`ADX=${adj.adxMaxRange.value}`);
+          if (adj.volumeConfirmMin.value !== 1.2) changes.push(`Vol=${adj.volumeConfirmMin.value}x`);
+          if (adj.stopLossATRMultiplier.value !== 1.5) changes.push(`SL=${adj.stopLossATRMultiplier.value}xATR`);
+          if (adj.minConfidence.value !== 60) changes.push(`Conf=${adj.minConfidence.value}%`);
+          if (changes.length > 0) {
+            log('INFO', `  ⚙️ IA Ajustes: ${changes.join(' | ')}`);
+          }
+        } else {
+          log('INFO', `  🤖 IA: Sin análisis cacheado (se generará en el próximo ciclo)`);
+        }
+      } catch (aiErr: any) {
+        log('WARN', `  🤖 IA: Error obteniendo análisis — ${aiErr.message}`);
       }
 
       if (strategyResult.circuitBreakerTriggered) {
@@ -1040,6 +1085,55 @@ function startStatusServer(): Promise<void> {
         return;
       }
 
+      // ═══ AI MARKET ANALYZER ENDPOINTS ═══
+
+      // Get AI analysis (cached, no LLM call)
+      if (url.pathname === '/ai-analysis') {
+        try {
+          const { getCachedAnalysis } = await import('../src/lib/ai-market-analyzer');
+          const analysis = getCachedAnalysis();
+          if (analysis) {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(analysis, null, 2));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ message: 'No hay análisis de IA disponible. Se generará en el próximo ciclo.', hint: 'Usa /ai-refresh para forzar un análisis.' }));
+          }
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
+      // Force AI analysis refresh (calls LLM)
+      if (url.pathname === '/ai-refresh') {
+        try {
+          const { getAIMarketAnalysis, forceRefreshAnalysis } = await import('../src/lib/ai-market-analyzer');
+          forceRefreshAnalysis();
+          log('INFO', '🤖 AI analysis refresh requested');
+          const analysis = await getAIMarketAnalysis('ETH/USD');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({
+            message: 'Análisis de IA actualizado',
+            regime: analysis.aiRegime,
+            confidence: analysis.aiRegimeConfidence,
+            riskLevel: analysis.riskLevel,
+            positionSizeMultiplier: analysis.positionSizeMultiplier,
+            shouldTrade: analysis.shouldTrade,
+            walkForwardValid: analysis.walkForwardValid,
+            walkForwardWinRate: analysis.walkForwardWinRate,
+            adjustments: analysis.suggestedAdjustments,
+            events: analysis.detectedEvents,
+            reasoning: analysis.overallReasoning,
+          }, null, 2));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+
       // Scan funding opportunities (read-only, no execution)
       if (url.pathname === '/funding-scan') {
         try {
@@ -1103,6 +1197,8 @@ function startStatusServer(): Promise<void> {
           toggleStrategy: '/toggle-strategy?strategy=fundingArb|gridTrading|meanReversion|orderFlow&action=enable|disable',
           fundingScan: '/funding-scan (GET — escanear funding rates)',
           meanReversionScan: '/mean-reversion-scan (GET — escanear señales mean reversion)',
+          aiAnalysis: '/ai-analysis (GET — ver análisis de IA)',
+          aiRefresh: '/ai-refresh (GET — forzar nuevo análisis de IA)',
           resetCircuitBreaker: '/reset-circuit-breaker (GET)',
         },
         dashboard: 'https://signal-trade-seven.vercel.app',
@@ -1235,10 +1331,21 @@ async function main(): Promise<void> {
     // Enable auto-execution in PAPER mode
     await enableAutoExecutionPaper();
 
+    // ═══ INITIALIZE AI MARKET ANALYZER ═══
+    // Loads cached analysis + walk-forward trade history from DB
+    try {
+      const { loadAIAnalyzerState } = await import('../src/lib/ai-market-analyzer');
+      await loadAIAnalyzerState();
+      log('INFO', '  🤖 AI Market Analyzer cargado (análisis adaptativo cada 30 min)');
+    } catch (err: any) {
+      log('WARN', `  ⚠️ AI Analyzer init falló: ${err.message}. Se usarán parámetros por defecto.`);
+    }
+
     log('INFO', '🚀 AUTO-START completo — Worker listo para operar');
     log('INFO', '');
     log('INFO', '  📊 ESTRATEGIA ACTIVA:');
     log('INFO', '    ⭐ Mean Reversion ETHUSDT 1H — PF 2.32, WR 62.3%, Sharpe 6.04');
+    log('INFO', '    🤖 IA Adaptativa — Ajusta parámetros según condiciones del mercado');
     log('INFO', '    ✅ Paper Trading (sin capital real)');
     log('INFO', '    ❌ Auto-Trader V7 DESACTIVADO (sin edge probado)');
     log('INFO', '');
@@ -1279,6 +1386,15 @@ async function main(): Promise<void> {
       }
     } catch (err: any) {
       log('WARN', `Strategy Manager check failed: ${err.message}`);
+    }
+
+    // Initialize AI Analyzer (non-auto mode)
+    try {
+      const { loadAIAnalyzerState } = await import('../src/lib/ai-market-analyzer');
+      await loadAIAnalyzerState();
+      log('INFO', '🤖 AI Market Analyzer cargado');
+    } catch (err: any) {
+      log('WARN', `AI Analyzer init falló: ${err.message}`);
     }
   }
 
