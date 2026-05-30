@@ -807,7 +807,8 @@ function startStatusServer(): Promise<void> {
         res.end(JSON.stringify({
           status: 'healthy',
           worker: 'running',
-          autoTrader: state.autoTraderEnabled,
+          autoTraderV7: false,  // PERMANENTLY DISABLED (no edge)
+          strategyManager: true,  // Mean Reversion ETHUSDT 1H active
           lastCycle: state.lastCycle,
           totalCycles: state.totalCycles,
           positionsClosedSLTP: state.totalPositionsClosedSLTP,
@@ -820,18 +821,21 @@ function startStatusServer(): Promise<void> {
       }
 
       if (url.pathname === '/activate') {
-        db.appSettings.upsert({
-          where: { key: 'autoTraderRunning' },
-          create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
-          update: { value: 'true' },
-        }).then(async () => {
-          state.autoTraderEnabled = true;
-          // Also enable auto-execution in PAPER mode
+        // ═══ PROTECTED: Old auto-trader V7 is PERMANENTLY DISABLED (no edge) ═══
+        // This endpoint now only enables auto-execution for Strategy Manager (Mean Reversion)
+        // It does NOT re-enable the old pattern-based auto-trader
+        try {
+          // Enable auto-execution in PAPER mode for Strategy Manager
           await enableAutoExecutionPaper();
-          log('INFO', '✅ Auto-Trader ACTIVADO vía /activate (auto-execution PAPER enabled)');
-        });
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, message: 'Auto-Trader activado + auto-execution PAPER enabled' }));
+          // DO NOT set autoTraderRunning = 'true' or state.autoTraderEnabled = true
+          // The old auto-trader stays disabled — runAutoTrader() enforces this each cycle
+          log('INFO', '✅ Auto-execution (PAPER) activado vía /activate — Strategy Manager opera, Auto-Trader V7 sigue DESACTIVADO');
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Auto-execution PAPER activado. Auto-Trader V7 permanece DESACTIVADO (sin edge). Solo Strategy Manager genera señales.' }));
+        } catch (err: any) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: err.message }));
+        }
         return;
       }
 
@@ -897,16 +901,11 @@ function startStatusServer(): Promise<void> {
             create: { key: 'autoTraderConfig', value: JSON.stringify(optimalConfig), description: 'Optimal data collection config' },
             update: { value: JSON.stringify(optimalConfig) },
           });
-          // Also enable auto-trader
-          await db.appSettings.upsert({
-            where: { key: 'autoTraderRunning' },
-            create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
-            update: { value: 'true' },
-          });
-          // Also enable auto-execution in PAPER mode
+          // DO NOT enable old auto-trader (permanently disabled — no edge)
+          // Only enable auto-execution for Strategy Manager
           await enableAutoExecutionPaper();
-          state.autoTraderEnabled = true;
-          log('INFO', '🎯 Configuración ÓPTIMA aplicada — Modo recolección de datos (auto-execution PAPER enabled)');
+          // state.autoTraderEnabled stays false — old auto-trader is dead
+          log('INFO', '🎯 Configuración ÓPTIMA aplicada — Auto-execution PAPER activado (Auto-Trader V7 sigue DESACTIVADO)');
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, message: 'Configuración óptima aplicada + auto-execution PAPER', config: optimalConfig }));
         } catch (err: any) {

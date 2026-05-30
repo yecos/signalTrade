@@ -5,7 +5,7 @@
 //   2. Grid Trading Adaptativo (captura volatilidad en mercados ranging)
 //   3. Mean Reversion BB+RSI+ADX (reversión a la media con filtros estrictos)
 //   4. Order Flow / OI Confirmation (filtro de confirmación para otras estrategias)
-//   5. Auto-Trader v7 (sistema original, ahora como fallback)
+//   5. Auto-Trader v7 (PERMANENTLY DISABLED — patrones sin edge probado)
 //
 // LÓGICA DE PRIORIZACIÓN:
 //   - Si funding rate > 0.05% → Funding Arb tiene prioridad (edge estructural)
