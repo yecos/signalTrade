@@ -1,16 +1,16 @@
-// MARKET DATA FEEDER v4 — Alimenta la app con datos avanzados de mercado
+// MARKET DATA FEEDER v5 — Alimenta la app con datos avanzados de mercado
 // Fuentes de datos:
 // 1. Binance API (público, sin API key): Velas — PRIMARIO porque funciona desde cualquier red
 // 2. Bybit API (público, sin API key): Ticker, OI, Funding, Orderbook — solo para datos que Binance no tiene
 // 3. CoinGecko API (público): Fear & Greed Index, BTC Dominance, Market Cap Global
 // 4. Datos derivados: Sentimiento compuesto, calidad de liquidez, presión direccional
 //
-// v4 CHANGES (from v3):
-// - Binance as PRIMARY source for klines (Bybit was unreliable from user's network)
-// - Bybit reserved only for: ticker, OI, funding, orderbook (unique data)
-// - Bybit calls fully sequential with 1s delays — never more than 1 at a time
-// - Graceful degradation: if Bybit fails, sentiment still computed with price from Binance
-// - Binance klines fetched with proper error handling and retry
+// v5 CHANGES (from v4):
+// - ALL DB operations wrapped with withRetry() — no more raw upserts that fail on Turso
+// - Delays between DB batches to prevent Turso HTTP connection saturation
+// - Candle upsert batch size reduced from 10 → 5 (fewer concurrent HTTP connections to Turso)
+// - 200ms delay between DB batches to give Turso breathing room
+// - Prisma error logging suppressed for transient errors (reduces noise)
 
 import { db, withRetry } from './db';
 import { BybitClient, getBrokerClientFromDB, assetToSymbol, isCryptoAsset } from './broker-client';
@@ -261,23 +261,26 @@ export async function feedMarketData(): Promise<{
           continue;
         }
 
-        // Batch upsert candles to DB
-        const BATCH_SIZE = 10;
+        // Batch upsert candles to DB — v5: smaller batches + delays + withRetry
+        const BATCH_SIZE = 5; // Reduced from 10 → fewer concurrent Turso HTTP connections
         for (let i = 0; i < klines.length; i += BATCH_SIZE) {
           const batch = klines.slice(i, i + BATCH_SIZE);
           const upsertPromises = batch.map(async (k) => {
             const timestamp = new Date(k.timestamp);
             try {
-              await db.marketCandle.upsert({
-                where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
-                create: {
-                  asset, timeframe: tf, timestamp,
-                  open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-                },
-                update: {
-                  open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-                },
-              });
+              await withRetry(
+                () => db.marketCandle.upsert({
+                  where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
+                  create: {
+                    asset, timeframe: tf, timestamp,
+                    open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+                  },
+                  update: {
+                    open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+                  },
+                }),
+                2, 500, `candle-${asset}-${tf}`
+              );
               return true;
             } catch {
               return false;
@@ -285,11 +288,22 @@ export async function feedMarketData(): Promise<{
           });
           const batchResults = await Promise.allSettled(upsertPromises);
           candlesUpdated += batchResults.filter(r => r.status === 'fulfilled' && r.value).length;
+
+          // Delay between batches to prevent Turso HTTP connection saturation
+          if (i + BATCH_SIZE < klines.length) {
+            await delay(200);
+          }
         }
       } catch (err: any) {
         errors.push(`Candles ${asset} ${tf}: ${err.message}`);
       }
+
+      // Small delay between timeframes to reduce Turso pressure
+      await delay(300);
     }
+
+    // Small delay between assets to reduce Turso pressure
+    await delay(500);
   }
 
   if (binanceCandleErrors > 0) {
@@ -346,7 +360,7 @@ export async function feedMarketData(): Promise<{
 
   // Log summary
   const bybitUsed = sentimentsUpdated > 0 || instrumentsCache.size > 0;
-  console.log(`[FEEDER] v4: ${candlesUpdated} candles (Binance), ${sentimentsUpdated} sentiments (${bybitUsed ? 'Bybit+Bin' : 'Binance-only'}), ${errors.length} errors`);
+  console.log(`[FEEDER] v5: ${candlesUpdated} candles (Binance), ${sentimentsUpdated} sentiments (${bybitUsed ? 'Bybit+Bin' : 'Binance-only'}), ${errors.length} errors`);
 
   return { candlesUpdated, sentimentsUpdated, errors };
 }

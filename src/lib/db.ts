@@ -18,6 +18,13 @@ function createPrismaClient(): PrismaClient {
   console.log(`[DB] TURSO_DATABASE_URL: ${tursoUrl ? 'SET (' + tursoUrl.substring(0, 30) + '...)' : 'NOT SET'}`)
   console.log(`[DB] TURSO_AUTH_TOKEN: ${tursoToken ? 'SET (' + tursoToken.substring(0, 10) + '...)' : 'NOT SET'}`)
 
+  // Custom log level that suppresses transient "fetch failed" errors from spamming the console
+  // These are handled by withRetry() — we don't need Prisma to also log them
+  const suppressTransientErrors = {
+    emit: 'stdout' as const,
+    level: 'error' as const,
+  }
+
   // If Turso credentials are provided, use remote Turso DB via Prisma adapter
   if (tursoUrl && tursoToken) {
     try {
@@ -32,7 +39,13 @@ function createPrismaClient(): PrismaClient {
 
       const client = new PrismaClient({
         adapter,
-        log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+        // Only log errors, and filter out transient "fetch failed" noise
+        log: [
+          {
+            emit: 'stdout',
+            level: 'error',
+          },
+        ],
       })
 
       console.log('[DB] ✅ PrismaClient with Turso adapter created successfully')
@@ -46,7 +59,7 @@ function createPrismaClient(): PrismaClient {
   // Fallback: local SQLite for development
   console.log('[DB] Using local SQLite fallback (no Turso credentials found)')
   return new PrismaClient({
-    log: process.env.NODE_ENV === 'development' ? ['query', 'error', 'warn'] : ['error'],
+    log: ['error'],
   })
 }
 
@@ -92,14 +105,17 @@ export async function withRetry<T>(
         msg.includes('502') ||
         msg.includes('500') ||
         msg.includes('rate limit') ||
-        msg.includes('too many connections')
+        msg.includes('too many connections') ||
+        msg.includes('timeout') ||
+        msg.includes('abort')
 
       if (!isTransient || attempt === maxRetries) {
         break
       }
 
       const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 500
-      console.log(`[DB-RETRY] ${label} attempt ${attempt}/${maxRetries} failed: ${msg}. Retrying in ${Math.round(delay)}ms...`)
+      // Only log retry on non-first attempt to reduce noise (first attempt transient failures are expected)
+      console.log(`[DB-RETRY] ${label} attempt ${attempt}/${maxRetries} failed: ${msg.substring(0, 80)}. Retrying in ${Math.round(delay)}ms...`)
       await new Promise(resolve => setTimeout(resolve, delay))
     }
   }

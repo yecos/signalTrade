@@ -796,7 +796,7 @@ async function loadRecentSignalPerformance(): Promise<void> {
       recentTrades = recentTrades.slice(-100);
     }
 
-    console.log(`[AI-ANALYZER] Total walk-forward trades after DB load: ${recentTrades.length}`);
+    console.log(`[AI-ANALYZER] Total walk-forward trades after DB load: ${recentTrades.length}${recentTrades.length === 0 ? ' (esperado — Mean Reversion aún no genera trades cerrados, usando backtest proven defaults)' : ''}`);
   } catch (err: any) {
     console.error(`[AI-ANALYZER] Error loading signal performance: ${err.message}`);
   }
