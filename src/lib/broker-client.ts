@@ -166,8 +166,8 @@ export class BybitClient {
     }
 
     // ═══ Retry logic with timeout ═══
-    const MAX_RETRIES = 3;
-    const TIMEOUT_MS = 15000; // 15 second timeout
+    const MAX_RETRIES = 2; // Reduced from 3 — fail fast on persistent errors
+    const TIMEOUT_MS = 8000; // 8 second timeout (was 15s — too slow for cycles)
     const isTransientError = (err: any) => {
       const msg = (err.message || '').toLowerCase();
       return msg.includes('fetch failed') || msg.includes('econnreset') ||
@@ -210,6 +210,12 @@ export class BybitClient {
         }
 
         if (data.retCode !== 0) {
+          // Don't retry API parameter errors — they'll fail the same way every time
+          const isParamError = (data.retMsg || '').includes('params error') || data.retCode === 10001;
+          if (isParamError) {
+            console.error(`[BYBIT] API Param Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
+            return { success: false, retCode: data.retCode, retMsg: data.retMsg };
+          }
           console.error(`[BYBIT] API Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
           return { success: false, retCode: data.retCode, retMsg: data.retMsg };
         }
@@ -450,6 +456,7 @@ export class BybitClient {
       category: 'linear',
       symbol,
       interval,
+      intervalTime: interval,  // Required by recent Bybit API update
       limit: limit.toString(),
     });
     if (!result.success || !result.result?.list) return [];
@@ -485,10 +492,14 @@ export class BybitClient {
     close: number;
     volume: number;
   }>> {
+    // Bybit V5 requires both 'interval' and 'intervalTime' parameters
+    // interval = the timeframe string (e.g. '5', '60', '240')
+    // intervalTime = must match interval for linear perpetual
     const result = await this.request('GET', '/v5/market/kline', {
       category: 'linear',
       symbol,
       interval,
+      intervalTime: interval,  // Required by recent Bybit API update
       limit: limit.toString(),
     });
     if (!result.success || !result.result?.list) return [];

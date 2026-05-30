@@ -296,6 +296,17 @@ export async function executeStrategyCycle(): Promise<StrategyCycleResult> {
     }
   } catch { /* use default */ }
 
+  // ═══ ALWAYS RUN AI MARKET ANALYZER ═══
+  // Even in OffHours, we want the AI analysis cached and available for the dashboard.
+  // The AI will still decide shouldTrade=false during bad conditions.
+  try {
+    const { getAIMarketAnalysis } = await import('./ai-market-analyzer');
+    await getAIMarketAnalysis('ETH/USD');
+  } catch (err: any) {
+    // Non-critical — AI analysis is optional, defaults will be used
+    result.strategyRecommendations.push(`IA Analyzer: Error — ${err.message}`);
+  }
+
   // ═══ ADAPTIVE STRATEGY SELECTION ═══
   // Based on regime and session, decide which strategies to run
 
