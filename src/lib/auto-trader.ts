@@ -1465,6 +1465,10 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
   });
   const autoExecution = executionSetting ? JSON.parse(executionSetting.value) : { enabled: false, mode: 'PAPER' };
 
+  // Determine data collection mode (same logic as generateAutoSignal: < 1000 closed signals)
+  const totalClosedSignals = await db.signal.count({ where: { status: { not: 'PENDING' } } });
+  const cycleIsDataCollectionMode = totalClosedSignals < 1000;
+
   // Process each asset
   for (const asset of cfg.assets) {
     try {
@@ -1503,7 +1507,7 @@ export async function runAutoTraderCycle(config?: Partial<AutoTraderConfig>): Pr
             setupScore: result.setupScore,
             qualityScore: result.qualityScore,
             atr: atr || result.indicators?.atr14 || 0,
-            dataCollectionMode: result.statisticalReliability === 'INSUFFICIENT' || result.statisticalReliability === 'LOW', // data collection mode if not enough samples
+            dataCollectionMode: cycleIsDataCollectionMode, // data collection mode from total signal count
           });
 
           if (execResult.success) {
