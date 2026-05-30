@@ -13,7 +13,7 @@ config({ path: '../.env' });
 config({ path: '.env' });
 
 // ─── Imports from project libs ──────────────────────────────────────────────
-import { db, runAutoMigration, withRetry } from '../src/lib/db';
+import { db, runAutoMigration, withRetry, startDbKeepalive } from '../src/lib/db';
 import { evaluateSignal, checkAlerts } from '../src/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus, getCandles as getEngineCandles } from '../src/lib/market-engine';
 import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSignal } from '../src/lib/auto-trader';
@@ -1247,6 +1247,10 @@ async function main(): Promise<void> {
       process.exit(1);
     }
   }
+
+  // ─── START DB KEEPALIVE ──────────────────────────────────────────────
+  // Periodically pings Turso to prevent idle connection drops
+  startDbKeepalive(120_000); // Every 2 minutes
 
   // ─── AUTO-MIGRATION: Add missing columns (MTF etc.) ──────────────────────
   try {

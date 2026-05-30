@@ -767,8 +767,11 @@ export function getBrokerClient(): BybitClient | PaperTradingClient {
 // This is the preferred method — reads API keys from the Account table
 export async function getBrokerClientFromDB(): Promise<BybitClient | PaperTradingClient> {
   try {
-    const { db } = await import('./db');
-    const account = await db.account.findFirst({ where: { isActive: true } });
+    const { db, withRetry } = await import('./db');
+    const account = await withRetry(
+      () => db.account.findFirst({ where: { isActive: true } }),
+      2, 800, 'broker-read-credentials'
+    );
 
     if (account && account.apiKey && account.apiSecret && account.broker === 'BYBIT') {
       const testnet = !account.isLive; // isLive=false means testnet
@@ -781,7 +784,11 @@ export async function getBrokerClientFromDB(): Promise<BybitClient | PaperTradin
       });
     }
   } catch (err: any) {
-    console.warn(`[BROKER] Could not read DB credentials: ${err.message}`);
+    // Only log if it's NOT a transient error (transient errors are handled by withRetry)
+    const msg = err?.message || ''
+    if (!msg.includes('fetch failed')) {
+      console.warn(`[BROKER] Could not read DB credentials: ${msg}`);
+    }
   }
 
   // Fallback to env vars

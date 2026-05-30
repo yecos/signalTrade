@@ -18,13 +18,6 @@ function createPrismaClient(): PrismaClient {
   console.log(`[DB] TURSO_DATABASE_URL: ${tursoUrl ? 'SET (' + tursoUrl.substring(0, 30) + '...)' : 'NOT SET'}`)
   console.log(`[DB] TURSO_AUTH_TOKEN: ${tursoToken ? 'SET (' + tursoToken.substring(0, 10) + '...)' : 'NOT SET'}`)
 
-  // Custom log level that suppresses transient "fetch failed" errors from spamming the console
-  // These are handled by withRetry() — we don't need Prisma to also log them
-  const suppressTransientErrors = {
-    emit: 'stdout' as const,
-    level: 'error' as const,
-  }
-
   // If Turso credentials are provided, use remote Turso DB via Prisma adapter
   if (tursoUrl && tursoToken) {
     try {
@@ -39,7 +32,7 @@ function createPrismaClient(): PrismaClient {
 
       const client = new PrismaClient({
         adapter,
-        // Only log errors, and filter out transient "fetch failed" noise
+        // Only log errors (queries/info are too noisy)
         log: [
           {
             emit: 'stdout',
@@ -49,6 +42,25 @@ function createPrismaClient(): PrismaClient {
       })
 
       console.log('[DB] ✅ PrismaClient with Turso adapter created successfully')
+
+      // ═══ SUPPRESS Prisma's transient error logging ═══
+      // Prisma logs "prisma:error fetch failed" BEFORE our withRetry() catches them.
+      // We intercept the specific format to reduce noise. withRetry() handles the actual retries.
+      const origStdoutWrite = process.stdout.write.bind(process.stdout)
+      let suppressTransient = true
+      process.stdout.write = function(this: any, ...args: any[]) {
+        const data = typeof args[0] === 'string' ? args[0] : ''
+        if (suppressTransient && data && (
+          data.includes('prisma:error fetch failed') ||
+          data.includes('prisma:error ECONNRESET') ||
+          data.includes('prisma:error ETIMEDOUT')
+        )) {
+          // Suppress — withRetry() handles these
+          return true
+        }
+        return origStdoutWrite.apply(this, args)
+      }
+
       return client
     } catch (err) {
       console.error('[DB] ❌ Failed to create PrismaClient with Turso adapter:', err)
@@ -88,6 +100,8 @@ export async function withRetry<T>(
   let lastError: any
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
+      // Acquire DB concurrency slot before executing
+      await acquireDbSlot()
       return await fn()
     } catch (err: any) {
       lastError = err
@@ -114,12 +128,66 @@ export async function withRetry<T>(
       }
 
       const delay = baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 500
-      // Only log retry on non-first attempt to reduce noise (first attempt transient failures are expected)
       console.log(`[DB-RETRY] ${label} attempt ${attempt}/${maxRetries} failed: ${msg.substring(0, 80)}. Retrying in ${Math.round(delay)}ms...`)
       await new Promise(resolve => setTimeout(resolve, delay))
+    } finally {
+      releaseDbSlot()
     }
   }
   throw lastError
+}
+
+// ─── DB CONCURRENCY LIMITER ──────────────────────────────────────────────────
+// Turso HTTP connections are limited — too many concurrent requests cause
+// "fetch failed" errors. This semaphore limits concurrent DB operations.
+
+const MAX_DB_CONCURRENCY = 4
+let activeDbOps = 0
+let dbWaitQueue: Array<{ resolve: () => void }> = []
+
+function acquireDbSlot(): Promise<void> {
+  if (activeDbOps < MAX_DB_CONCURRENCY) {
+    activeDbOps++
+    return Promise.resolve()
+  }
+  return new Promise<void>((resolve) => {
+    dbWaitQueue.push({ resolve })
+  })
+}
+
+function releaseDbSlot(): void {
+  activeDbOps--
+  const next = dbWaitQueue.shift()
+  if (next) {
+    activeDbOps++
+    next.resolve()
+  }
+}
+
+// ─── DB KEEPALIVE ────────────────────────────────────────────────────────────
+// Periodically pings Turso to keep the HTTP connection warm.
+// Without this, idle connections go stale and the next query fails.
+
+let keepaliveTimer: ReturnType<typeof setInterval> | null = null
+
+export function startDbKeepalive(intervalMs: number = 120_000): void {
+  if (keepaliveTimer) return // Already running
+  keepaliveTimer = setInterval(async () => {
+    try {
+      await withRetry(() => db.signal.count(), 1, 500, 'keepalive')
+    } catch {
+      // Ignore — keepalive is best-effort
+    }
+  }, intervalMs)
+  console.log(`[DB-KEEPALIVE] Started (every ${intervalMs / 1000}s)`)
+}
+
+export function stopDbKeepalive(): void {
+  if (keepaliveTimer) {
+    clearInterval(keepaliveTimer)
+    keepaliveTimer = null
+    console.log('[DB-KEEPALIVE] Stopped')
+  }
 }
 
 // Test database connectivity

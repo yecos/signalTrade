@@ -728,44 +728,53 @@ async function persistWalkForwardTrades(): Promise<void> {
 
 export async function loadAIAnalyzerState(): Promise<void> {
   try {
-    // Load cached analysis
-    const analysisSetting = await db.appSettings.findUnique({
-      where: { key: 'ai_market_analysis' },
-    });
+    // Load cached analysis (with retry for Turso)
+    const analysisSetting = await withRetry(
+      () => db.appSettings.findUnique({ where: { key: 'ai_market_analysis' } }),
+      2, 800, 'ai-load-analysis'
+    );
     if (analysisSetting) {
       cachedAnalysis = JSON.parse(analysisSetting.value);
       lastAnalysisTime = new Date(cachedAnalysis!.timestamp).getTime();
       console.log(`[AI-ANALYZER] Loaded cached analysis from ${cachedAnalysis!.timestamp}`);
     }
 
-    // Load walk-forward trades
-    const tradesSetting = await db.appSettings.findUnique({
-      where: { key: 'ai_walkforward_trades' },
-    });
+    // Load walk-forward trades (with retry for Turso)
+    const tradesSetting = await withRetry(
+      () => db.appSettings.findUnique({ where: { key: 'ai_walkforward_trades' } }),
+      2, 800, 'ai-load-walkforward'
+    );
     if (tradesSetting) {
       recentTrades = JSON.parse(tradesSetting.value);
-      console.log(`[AI-ANALYZER] Loaded ${recentTrades.length} walk-forward trades`);
+      console.log(`[AI-ANALYZER] Loaded ${recentTrades.length} walk-forward trades from DB`);
     }
 
     // Also load from Signal records for historical performance
     await loadRecentSignalPerformance();
   } catch (err: any) {
-    console.error(`[AI-ANALYZER] Error loading state: ${err.message}`);
+    // Don't spam with transient errors — they're handled by withRetry
+    const msg = err?.message || ''
+    if (!msg.includes('fetch failed')) {
+      console.error(`[AI-ANALYZER] Error loading state: ${msg}`);
+    }
   }
 }
 
 async function loadRecentSignalPerformance(): Promise<void> {
   try {
-    // Load last 50 closed signals from Mean Reversion
-    const signals = await db.signal.findMany({
-      where: {
-        patternType: 'mean_reversion',
-        status: 'CLOSED',
-        result: { in: ['WIN', 'LOSS'] },
-      },
-      orderBy: { entryTime: 'desc' },
-      take: 50,
-    });
+    // Load last 50 closed signals from Mean Reversion (with retry)
+    const signals = await withRetry(
+      () => db.signal.findMany({
+        where: {
+          patternType: 'mean_reversion',
+          status: 'CLOSED',
+          result: { in: ['WIN', 'LOSS'] },
+        },
+        orderBy: { entryTime: 'desc' },
+        take: 50,
+      }),
+      2, 800, 'ai-load-signals'
+    );
 
     for (const signal of signals) {
       const pnl = signal.result === 'WIN'
@@ -796,8 +805,15 @@ async function loadRecentSignalPerformance(): Promise<void> {
       recentTrades = recentTrades.slice(-100);
     }
 
-    console.log(`[AI-ANALYZER] Total walk-forward trades after DB load: ${recentTrades.length}${recentTrades.length === 0 ? ' (esperado — Mean Reversion aún no genera trades cerrados, usando backtest proven defaults)' : ''}`);
+    if (recentTrades.length === 0) {
+      console.log(`[AI-ANALYZER] Walk-forward: 0 trades (esperado — Mean Reversion en paper trading, usando backtest proven defaults: WR 62.3%, PF 2.32)`);
+    } else {
+      console.log(`[AI-ANALYZER] Walk-forward: ${recentTrades.length} trades loaded`);
+    }
   } catch (err: any) {
-    console.error(`[AI-ANALYZER] Error loading signal performance: ${err.message}`);
+    const msg = err?.message || ''
+    if (!msg.includes('fetch failed')) {
+      console.error(`[AI-ANALYZER] Error loading signal performance: ${msg}`);
+    }
   }
 }

@@ -688,9 +688,12 @@ export async function getSentimentFromDB(asset: string): Promise<MarketSentiment
   if (cached && Date.now() - lastCacheUpdate < CACHE_TTL_MS) return cached;
 
   try {
-    const setting = await db.appSettings.findUnique({
-      where: { key: `sentiment_${asset.replace('/', '_')}` },
-    });
+    const setting = await withRetry(
+      () => db.appSettings.findUnique({
+        where: { key: `sentiment_${asset.replace('/', '_')}` },
+      }),
+      2, 500, `getSentiment-${asset}`
+    );
     if (setting) {
       const parsed = JSON.parse(setting.value);
       sentimentCache.set(asset, parsed);
