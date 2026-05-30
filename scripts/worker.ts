@@ -964,10 +964,11 @@ async function main(): Promise<void> {
   log('INFO', '🏃 Ejecutando primer ciclo...');
   await runCycle();
 
-  // ═══ MID-CYCLE SL/TP MONITORING ═══
-  // Check SL/TP every 60 seconds between full cycles
+  // ═══ MID-CYCLE MONITORING ═══
+  // Check SL/TP + expiration + safety timeout every 60 seconds between full cycles
   // This is critical for M5 trading with tight stops (0.5-0.8%)
   const MONITOR_INTERVAL_MS = 60000; // 1 minute
+  const MAX_POSITION_AGE_MS = 2 * 60 * 60 * 1000; // 2 hours safety timeout
   let monitorRunning = false;
 
   setInterval(async () => {
@@ -978,10 +979,34 @@ async function main(): Promise<void> {
 
       monitorRunning = true;
       const engine = getExecutionEngine();
-      const closed = await engine.checkStopLossTakeProfit();
+
+      // Check SL/TP hits (includes trailing stop + breakeven)
+      let closed = await engine.checkStopLossTakeProfit();
+
+      // Check expired positions (was missing — positions sat past expiration!)
+      try {
+        const expired = await engine.checkAndCloseExpired();
+        closed += expired;
+        if (expired > 0) state.totalPositionsExpired += expired;
+      } catch { /* ignore */ }
+
+      // Safety timeout: force-close any position open > 2 hours
+      try {
+        const stalePositions = await db.position.findMany({ where: { status: 'OPEN' } });
+        const now = Date.now();
+        for (const pos of stalePositions) {
+          const age = now - new Date(pos.createdAt).getTime();
+          if (age > MAX_POSITION_AGE_MS) {
+            await engine.closePosition(pos.id, `SAFETY TIMEOUT: position open ${Math.round(age / 60000)} min (max 120 min)`);
+            closed++;
+            log('WARN', `⏰ [MONITOR] Force-closed stale position ${pos.id.substring(0,8)} (${Math.round(age / 60000)} min old)`);
+          }
+        }
+      } catch { /* ignore */ }
+
       if (closed > 0) {
         state.totalPositionsClosedSLTP += closed;
-        log('INFO', `🔴 [MONITOR] ${closed} position(s) closed by SL/TP (mid-cycle check)`);
+        log('INFO', `🔴 [MONITOR] ${closed} position(s) closed (mid-cycle: SL/TP/expiry/timeout)`);
       }
       monitorRunning = false;
     } catch (err: any) {
