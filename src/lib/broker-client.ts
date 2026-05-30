@@ -205,8 +205,14 @@ export class BybitClient {
 
       return { success: true, ...data };
     } catch (err: any) {
-      console.error(`[BYBIT] Request failed: ${err.message}`);
-      return { success: false, retCode: -1, retMsg: err.message };
+      // Only log as warn (not error) for network issues — these are transient and expected
+      const msg = err?.message || String(err);
+      if (msg.includes('fetch failed') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('AbortError')) {
+        // Network error — silent unless in debug mode (already logged too many of these)
+      } else {
+        console.error(`[BYBIT] Request failed: ${msg}`);
+      }
+      return { success: false, retCode: -1, retMsg: msg };
     }
   }
 

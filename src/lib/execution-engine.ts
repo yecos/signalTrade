@@ -10,7 +10,7 @@
 // 5. SL/TP/Timer-based exit triggers close
 // 6. Trade result is recorded with P&L, slippage, journal
 
-import { db } from './db';
+import { db, withRetry } from './db';
 import { getBrokerClientFromDB, assetToSymbol, isCryptoAsset, BybitClient, PaperTradingClient, type OrderResult } from './broker-client';
 import { assessRisk, getOrCreateAccount, updateAccountBalance } from './risk-manager';
 
@@ -362,63 +362,78 @@ export class ExecutionEngine {
       : 0;
 
     // Update trade
-    const trade = await db.trade.findFirst({
-      where: { id: position.tradeId || undefined },
-    });
+    const trade = await withRetry(
+      () => db.trade.findFirst({ where: { id: position.tradeId || undefined } }),
+      2, 500, 'closePosition-findTrade'
+    );
 
     if (trade) {
-      await db.trade.update({
-        where: { id: trade.id },
-        data: {
-          exitPrice: actualClosePrice,
-          realizedPnl,
-          realizedPnlPct,
-          commission: (trade.commission || 0) + (closeResult.commission || 0),
-          status: 'CLOSED',
-          closedAt: new Date(),
-        },
-      });
+      await withRetry(
+        () => db.trade.update({
+          where: { id: trade.id },
+          data: {
+            exitPrice: actualClosePrice,
+            realizedPnl,
+            realizedPnlPct,
+            commission: (trade.commission || 0) + (closeResult.commission || 0),
+            status: 'CLOSED',
+            closedAt: new Date(),
+          },
+        }),
+        3, 1000, 'closePosition-updateTrade'
+      );
     }
 
-    // Update position
-    await db.position.update({
-      where: { id: positionId },
-      data: {
-        status: 'CLOSED',
-        currentPrice: actualClosePrice,
-        unrealizedPnl: 0,
-        unrealizedPnlPct: 0,
-        closedAt: new Date(),
-      },
-    });
-
-    // Update account
-    const account = await getOrCreateAccount();
-    const newBalance = account.balance + realizedPnl;
-    const newEquity = newBalance;
-    await updateAccountBalance(account.id, newBalance, newEquity, 0);
-    await db.account.update({
-      where: { id: account.id },
-      data: {
-        dailyPnl: { increment: realizedPnl },
-      },
-    });
-
-    // Also update the linked signal with the real trade result
-    if (trade?.signalId) {
-      const signalResult = realizedPnl > 0 ? 'WIN' : realizedPnl < 0 ? 'LOSS' : 'DRAW';
-      await db.signal.update({
-        where: { id: trade.signalId },
+    // Update position — CRITICAL: this must succeed for the position to not remain OPEN
+    await withRetry(
+      () => db.position.update({
+        where: { id: positionId },
         data: {
-          exitPrice: actualClosePrice,
-          result: signalResult,
-          priceDifference: actualClosePrice - (trade.entryPrice || 0),
-          estimatedProfit: realizedPnl > 0 ? realizedPnl : 0,
-          estimatedLoss: realizedPnl < 0 ? Math.abs(realizedPnl) : 0,
           status: 'CLOSED',
-          verificationMethod: 'REAL',
+          currentPrice: actualClosePrice,
+          unrealizedPnl: 0,
+          unrealizedPnlPct: 0,
+          closedAt: new Date(),
+        },
+      }),
+      5, 2000, 'closePosition-updatePosition'
+    );
+
+    // Update account (non-critical — position is already closed)
+    try {
+      const account = await getOrCreateAccount();
+      const newBalance = account.balance + realizedPnl;
+      const newEquity = newBalance;
+      await updateAccountBalance(account.id, newBalance, newEquity, 0);
+      await db.account.update({
+        where: { id: account.id },
+        data: {
+          dailyPnl: { increment: realizedPnl },
         },
       });
+    } catch (accErr: any) {
+      console.warn(`[EXEC] Account update failed after position close: ${accErr.message}`);
+    }
+
+    // Also update the linked signal with the real trade result (non-critical)
+    if (trade?.signalId) {
+      try {
+        const signalResult = realizedPnl > 0 ? 'WIN' : realizedPnl < 0 ? 'LOSS' : 'DRAW';
+        await db.signal.update({
+          where: { id: trade.signalId },
+          data: {
+            exitPrice: actualClosePrice,
+            result: signalResult,
+            priceDifference: actualClosePrice - (trade.entryPrice || 0),
+            estimatedProfit: realizedPnl > 0 ? realizedPnl : 0,
+            estimatedLoss: realizedPnl < 0 ? Math.abs(realizedPnl) : 0,
+            status: 'CLOSED',
+            verificationMethod: 'REAL',
+          },
+        });
+      } catch (sigErr: any) {
+        console.warn(`[EXEC] Signal update failed after position close: ${sigErr.message}`);
+      }
     }
 
     console.log(`[EXEC] Position closed: ${positionId} | P&L: $${realizedPnl.toFixed(2)} (${realizedPnlPct.toFixed(2)}%) | Reason: ${reason}`);
