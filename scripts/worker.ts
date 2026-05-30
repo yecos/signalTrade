@@ -17,6 +17,9 @@ import { db, runAutoMigration } from '../src/lib/db';
 import { evaluateSignal, checkAlerts } from '../src/lib/signals';
 import { getLatestPrice as getEngineLatestPrice, getEngineStatus, getCandles as getEngineCandles } from '../src/lib/market-engine';
 import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSignal } from '../src/lib/auto-trader';
+import { getExecutionEngine } from '../src/lib/execution-engine';
+import { getBrokerClientFromDB, BybitClient } from '../src/lib/broker-client';
+import { getOrCreateAccount, updateAccountBalance } from '../src/lib/risk-manager';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 const WORKER_PORT = parseInt(process.env.WORKER_PORT || '3111');
@@ -37,6 +40,9 @@ interface WorkerState {
   totalSignalsVerified: number;
   totalErrors: number;
   autoTraderEnabled: boolean;
+  totalPositionsClosedSLTP: number;
+  totalPositionsExpired: number;
+  totalBalanceSyncs: number;
   cycleHistory: Array<{
     time: string;
     duration_ms: number;
@@ -60,6 +66,9 @@ const state: WorkerState = {
   totalSignalsVerified: 0,
   totalErrors: 0,
   autoTraderEnabled: false,
+  totalPositionsClosedSLTP: 0,
+  totalPositionsExpired: 0,
+  totalBalanceSyncs: 0,
   cycleHistory: [],
   engineStatus: null,
 };
@@ -217,6 +226,56 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
   return { generated: result.signalsGenerated, skipped: result.signalsSkipped, errors: result.errors };
 }
 
+// ─── Phase 2.5: Monitor open positions (SL/TP hits + expiration) ───────────
+async function monitorOpenPositions(): Promise<{ closedBySLTP: number; expired: number }> {
+  let closedBySLTP = 0;
+  let expired = 0;
+
+  // Check if auto-execution is enabled
+  const autoExecSetting = await db.appSettings.findUnique({ where: { key: 'autoExecution' } });
+  const autoExecEnabled = autoExecSetting ? (JSON.parse(autoExecSetting.value) as { enabled: boolean }).enabled : false;
+
+  if (!autoExecEnabled) {
+    // Even without auto-execution, check for open positions that need closing
+    // This handles positions that were opened manually or from a previous session
+    const openCount = await db.position.count({ where: { status: 'OPEN' } });
+    if (openCount === 0) {
+      return { closedBySLTP: 0, expired: 0 };
+    }
+    log('INFO', `  ⚠️ Auto-execution disabled but ${openCount} open positions found — checking anyway`);
+  }
+
+  try {
+    const engine = getExecutionEngine();
+
+    // Check SL/TP hits first
+    try {
+      closedBySLTP = await engine.checkStopLossTakeProfit();
+      if (closedBySLTP > 0) {
+        state.totalPositionsClosedSLTP += closedBySLTP;
+        log('INFO', `  🔴 ${closedBySLTP} position(s) closed by SL/TP`);
+      }
+    } catch (err: any) {
+      log('WARN', `  Error checking SL/TP: ${err.message}`);
+    }
+
+    // Check expired positions
+    try {
+      expired = await engine.checkAndCloseExpired();
+      if (expired > 0) {
+        state.totalPositionsExpired += expired;
+        log('INFO', `  ⏰ ${expired} position(s) closed by expiration`);
+      }
+    } catch (err: any) {
+      log('WARN', `  Error checking expired positions: ${err.message}`);
+    }
+  } catch (err: any) {
+    log('WARN', `  Position monitoring error: ${err.message}`);
+  }
+
+  return { closedBySLTP, expired };
+}
+
 // ─── Phase 3: Seed market data candles ──────────────────────────────────────
 async function seedMarketData(): Promise<{ seeded: number; total: number }> {
   const assets = ['EUR/USD', 'GBP/USD', 'BTC/USD', 'ETH/USD', 'USD/JPY'];
@@ -273,6 +332,41 @@ async function seedMarketData(): Promise<{ seeded: number; total: number }> {
   }
 
   return { seeded, total: assets.length };
+}
+
+// ─── Phase 3.5: Sync account balance from Bybit ────────────────────────────
+async function syncAccountBalance(): Promise<{ synced: boolean; balance?: number; equity?: number }> {
+  try {
+    const broker = await getBrokerClientFromDB();
+
+    // Only sync if using a real Bybit client (not paper trading)
+    if (!(broker instanceof BybitClient)) {
+      return { synced: false };
+    }
+
+    const accountInfo = await broker.getAccountInfo();
+    if (!accountInfo) {
+      log('WARN', '  Bybit account info unavailable — skipping balance sync');
+      return { synced: false };
+    }
+
+    // Update local account record with real balance/equity
+    const localAccount = await getOrCreateAccount();
+    await updateAccountBalance(
+      localAccount.id,
+      accountInfo.balance,
+      accountInfo.equity,
+      accountInfo.unrealizedPnl
+    );
+
+    state.totalBalanceSyncs++;
+    log('INFO', `  💰 Balance sync: $${accountInfo.balance.toFixed(2)} balance, $${accountInfo.equity.toFixed(2)} equity from Bybit`);
+
+    return { synced: true, balance: accountInfo.balance, equity: accountInfo.equity };
+  } catch (err: any) {
+    // Paper trading or connection error — skip silently
+    return { synced: false };
+  }
 }
 
 // ─── Phase 4: Engine health check ───────────────────────────────────────────
@@ -332,6 +426,16 @@ async function runCycle(): Promise<void> {
     errors++;
   }
 
+  // Phase 2.5: Monitor open positions (SL/TP + expiration)
+  try {
+    log('CYCLE', 'Fase 2.5: Monitoreando posiciones abiertas...');
+    const monitorResult = await monitorOpenPositions();
+    log('CYCLE', `Position monitoring: ${monitorResult.closedBySLTP} closed by SL/TP, ${monitorResult.expired} expired`);
+  } catch (err: any) {
+    log('ERROR', `Fase 2.5 error: ${err.message}`);
+    errors++;
+  }
+
   // Phase 3: Seed market data
   try {
     log('CYCLE', 'Fase 3: Actualizando datos de mercado...');
@@ -340,6 +444,20 @@ async function runCycle(): Promise<void> {
   } catch (err: any) {
     log('ERROR', `Fase 3 error: ${err.message}`);
     errors++;
+  }
+
+  // Phase 3.5: Sync account balance from Bybit
+  try {
+    log('CYCLE', 'Fase 3.5: Sincronizando balance de cuenta...');
+    const syncResult = await syncAccountBalance();
+    if (syncResult.synced) {
+      log('CYCLE', `Balance sync: $${syncResult.balance!.toFixed(2)} balance, $${syncResult.equity!.toFixed(2)} equity from Bybit`);
+    } else {
+      log('CYCLE', `  → Balance sync skipped (paper trading or unavailable)`);
+    }
+  } catch (err: any) {
+    // Balance sync failure is non-critical — don't count as error
+    log('WARN', `Fase 3.5: Balance sync skipped — ${err.message}`);
   }
 
   // Phase 4: Health check
@@ -373,6 +491,26 @@ async function runCycle(): Promise<void> {
   state.isRunning = false;
 }
 
+// ─── Helper: Enable auto-execution in PAPER mode ───────────────────────────
+async function enableAutoExecutionPaper(): Promise<void> {
+  try {
+    await db.appSettings.upsert({
+      where: { key: 'autoExecution' },
+      create: {
+        key: 'autoExecution',
+        value: JSON.stringify({ enabled: true, mode: 'PAPER' }),
+        description: 'Auto-execution setting — connects signal generation to trade execution',
+      },
+      update: {
+        value: JSON.stringify({ enabled: true, mode: 'PAPER' }),
+      },
+    });
+    log('INFO', '  ✅ Auto-execution habilitado (PAPER mode)');
+  } catch (err: any) {
+    log('WARN', `  ⚠️ Error habilitando auto-execution: ${err.message}`);
+  }
+}
+
 // ─── Status HTTP Server ─────────────────────────────────────────────────────
 function startStatusServer(): Promise<void> {
   return new Promise((resolve) => {
@@ -387,6 +525,9 @@ function startStatusServer(): Promise<void> {
           autoTrader: state.autoTraderEnabled,
           lastCycle: state.lastCycle,
           totalCycles: state.totalCycles,
+          positionsClosedSLTP: state.totalPositionsClosedSLTP,
+          positionsExpired: state.totalPositionsExpired,
+          balanceSyncs: state.totalBalanceSyncs,
           engine: state.engineStatus,
           uptime: process.uptime(),
         }, null, 2));
@@ -398,12 +539,14 @@ function startStatusServer(): Promise<void> {
           where: { key: 'autoTraderRunning' },
           create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
           update: { value: 'true' },
-        }).then(() => {
+        }).then(async () => {
           state.autoTraderEnabled = true;
-          log('INFO', '✅ Auto-Trader ACTIVADO vía /activate');
+          // Also enable auto-execution in PAPER mode
+          await enableAutoExecutionPaper();
+          log('INFO', '✅ Auto-Trader ACTIVADO vía /activate (auto-execution PAPER enabled)');
         });
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, message: 'Auto-Trader activado' }));
+        res.end(JSON.stringify({ success: true, message: 'Auto-Trader activado + auto-execution PAPER enabled' }));
         return;
       }
 
@@ -478,10 +621,12 @@ function startStatusServer(): Promise<void> {
             create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
             update: { value: 'true' },
           });
+          // Also enable auto-execution in PAPER mode
+          await enableAutoExecutionPaper();
           state.autoTraderEnabled = true;
-          log('INFO', '🎯 Configuración ÓPTIMA aplicada — Modo recolección de datos');
+          log('INFO', '🎯 Configuración ÓPTIMA aplicada — Modo recolección de datos (auto-execution PAPER enabled)');
           res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, message: 'Configuración óptima aplicada', config: optimalConfig }));
+          res.end(JSON.stringify({ success: true, message: 'Configuración óptima aplicada + auto-execution PAPER', config: optimalConfig }));
         } catch (err: any) {
           res.writeHead(500, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: err.message }));
@@ -514,12 +659,15 @@ function startStatusServer(): Promise<void> {
         totalCycles: state.totalCycles,
         signalsGenerated: state.totalSignalsGenerated,
         signalsVerified: state.totalSignalsVerified,
+        positionsClosedSLTP: state.totalPositionsClosedSLTP,
+        positionsExpired: state.totalPositionsExpired,
+        balanceSyncs: state.totalBalanceSyncs,
         errors: state.totalErrors,
         engine: state.engineStatus,
         cycleHistory: state.cycleHistory,
         endpoints: {
           health: '/health',
-          activate: '/activate',
+          activate: '/activate (also enables auto-execution PAPER)',
           deactivate: '/deactivate',
           runNow: '/run-now',
           optimalConfig: '/optimal-config (GET — aplica config óptima)',
@@ -640,6 +788,9 @@ async function main(): Promise<void> {
     } catch (err: any) {
       log('WARN', `  ⚠️ Error activando auto-trader: ${err.message}`);
     }
+
+    // Enable auto-execution in PAPER mode
+    await enableAutoExecutionPaper();
 
     log('INFO', '🚀 AUTO-START completo — Worker listo para operar');
     log('INFO', '');
