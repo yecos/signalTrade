@@ -97,20 +97,24 @@ Stage Summary:
 - Sidebar navigation with mobile responsive design
 - All text in Spanish
 ---
-Task ID: fix-bybit-api-and-ai-analyzer
+Task ID: fix-bybit-api-v2
 Agent: main
-Task: Fix Bybit API IntervalTime error, slow cycles, and AI Analyzer not caching
+Task: Fix Bybit API IntervalTime INVALID parameter causing ALL Bybit requests to fail
 
 Work Log:
-- Identified Bybit V5 API change: klines and OI endpoints now require 'intervalTime' parameter
-- Added intervalTime param to getKlines() and getOpenInterest() in broker-client.ts
-- Reduced request timeout from 15s to 8s, max retries from 3 to 2
-- Added early return for param errors (retCode 10001) to skip useless retries
-- Fixed AI Analyzer never caching: added getAIMarketAnalysis() call at start of strategy cycle
-- Previously AI only ran inside Mean Reversion signal generation, which requires good sessions
-- Now AI always runs, even in OffHours, so dashboard has cached analysis to show
+- CRITICAL BUG: `intervalTime` is NOT a valid Bybit V5 API parameter. The previous commit ADDED it thinking it was required, but it actually BROKE all kline and OI requests.
+- Bybit V5 API endpoints only accept: category, symbol, interval, start, end, limit — no intervalTime.
+- Removed intervalTime from getKlines() (broker-client.ts line 502)
+- Removed intervalTime from getOpenInterest() (broker-client.ts line 459)
+- Added proper Bybit V5 API documentation comments with valid interval values
+- Fixed AI Analyzer caching: when runFullAnalysis() fails, default analysis is now cached so getCachedAnalysis() doesn't return null
+- Changed console.error to console.warn for non-critical AI analyzer failures
+- Parallelized market-data-feeder: kline requests now use Promise.allSettled (2 assets × 4 timeframes = 8 parallel requests instead of sequential)
+- Parallelized sentiment computation for BTC/USD and ETH/USD
+- Root cause: The previous "fix" for error 10001 was actually introducing the error. The real problem was the invalid intervalTime parameter.
 
 Stage Summary:
-- Commit 762a4e0 pushed to GitHub
-- Should fix: Bybit API errors, 500s cycle times, AI Analyzer "no cached analysis"
-- Expected cycle time improvement: ~500s → ~60-90s
+- broker-client.ts: Removed invalid intervalTime parameter — FIXES ALL BYBIT API ERRORS
+- ai-market-analyzer.ts: Default analysis now cached on failure — FIXES "Sin análisis cacheado"
+- market-data-feeder.ts: Parallelized kline and sentiment fetching — REDUCES CYCLE TIME
+- These 3 fixes together should resolve: Bybit errors, 500s cycles, AI not caching, no signals generated

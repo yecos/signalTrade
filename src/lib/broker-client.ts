@@ -448,7 +448,9 @@ export class BybitClient {
   }
 
   // Get Open Interest
-  async getOpenInterest(symbol: string, interval: '5m' | '1h' | '1d' = '1h', limit: number = 30): Promise<Array<{
+  // Bybit V5 API: /v5/market/open-interest accepts category, symbol, interval, limit
+  // interval values: '5m', '15m', '30m', '1h', '4h', '1d'
+  async getOpenInterest(symbol: string, interval: '5m' | '15m' | '30m' | '1h' | '4h' | '1d' = '1h', limit: number = 30): Promise<Array<{
     timestamp: string;
     openInterest: number;
   }>> {
@@ -456,7 +458,6 @@ export class BybitClient {
       category: 'linear',
       symbol,
       interval,
-      intervalTime: interval,  // Required by recent Bybit API update
       limit: limit.toString(),
     });
     if (!result.success || !result.result?.list) return [];
@@ -484,6 +485,9 @@ export class BybitClient {
   }
 
   // Get klines (candles) from Bybit
+  // Bybit V5 API: /v5/market/kline accepts category, symbol, interval, start, end, limit
+  // interval values: '1','3','5','15','30','60','120','240','360','720','D','W','M'
+  // NOTE: Use numeric format (e.g. '60' for 1H, NOT '1h')
   async getKlines(symbol: string, interval: string = '5', limit: number = 200): Promise<Array<{
     timestamp: number;
     open: number;
@@ -492,14 +496,10 @@ export class BybitClient {
     close: number;
     volume: number;
   }>> {
-    // Bybit V5 requires both 'interval' and 'intervalTime' parameters
-    // interval = the timeframe string (e.g. '5', '60', '240')
-    // intervalTime = must match interval for linear perpetual
     const result = await this.request('GET', '/v5/market/kline', {
       category: 'linear',
       symbol,
       interval,
-      intervalTime: interval,  // Required by recent Bybit API update
       limit: limit.toString(),
     });
     if (!result.success || !result.result?.list) return [];

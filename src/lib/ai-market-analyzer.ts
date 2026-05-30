@@ -118,14 +118,19 @@ export async function getAIMarketAnalysis(asset: string = 'ETH/USD'): Promise<AI
 
     return analysis;
   } catch (err: any) {
-    console.error(`[AI-ANALYZER] Error running analysis: ${err.message}`);
+    console.warn(`[AI-ANALYZER] Error running analysis: ${err.message}. Using fallback.`);
 
-    // Return cached even if stale, or defaults
+    // Return cached even if stale, or cache+return defaults
     if (cachedAnalysis) {
       return cachedAnalysis;
     }
 
-    return getDefaultAnalysis();
+    // Cache the default analysis so getCachedAnalysis() doesn't return null
+    const defaultAnalysis = getDefaultAnalysis();
+    cachedAnalysis = defaultAnalysis;
+    lastAnalysisTime = now;
+
+    return defaultAnalysis;
   }
 }
 

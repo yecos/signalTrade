@@ -130,62 +130,82 @@ export async function feedMarketData(): Promise<{
     errors.push(`Macro data: ${err.message}`);
   }
 
-  // ═══ 1. FEED CANDLES FROM BYBIT ═══
-  for (const asset of cryptoAssets) {
+  // ═══ 1. FEED CANDLES FROM BYBIT (parallelized) ═══
+  // Fetch all kline data in parallel (2 assets × 4 timeframes = 8 requests)
+  const klinePromises = cryptoAssets.flatMap(asset => {
     const symbol = assetToSymbol(asset);
-    for (const [tf, bybitInterval] of Object.entries(intervals)) {
+    return Object.entries(intervals).map(async ([tf, bybitInterval]) => {
       try {
-        const klines = await bybitClient.getKlines(symbol, bybitInterval, 200);
-        if (klines.length === 0) continue;
-
-        let upserted = 0;
-        for (const k of klines) {
-          const timestamp = new Date(k.timestamp);
-          try {
-            await db.marketCandle.upsert({
-              where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
-              create: {
-                asset, timeframe: tf, timestamp,
-                open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-              },
-              update: {
-                open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-              },
-            });
-            upserted++;
-          } catch { /* skip duplicate errors */ }
-        }
-        if (upserted > 0) candlesUpdated += upserted;
+        const klines = await bybitClient!.getKlines(symbol, bybitInterval, 200);
+        return { asset, tf, klines };
       } catch (err: any) {
         errors.push(`Candles ${asset} ${tf}: ${err.message}`);
+        return { asset, tf, klines: [] };
       }
+    });
+  });
+
+  const klineResults = await Promise.allSettled(klinePromises);
+
+  // Upsert all candles to DB (sequential to avoid Turso connection overload)
+  for (const result of klineResults) {
+    if (result.status !== 'fulfilled') continue;
+    const { asset, tf, klines } = result.value;
+    if (klines.length === 0) continue;
+
+    let upserted = 0;
+    for (const k of klines) {
+      const timestamp = new Date(k.timestamp);
+      try {
+        await db.marketCandle.upsert({
+          where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
+          create: {
+            asset, timeframe: tf, timestamp,
+            open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+          },
+          update: {
+            open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+          },
+        });
+        upserted++;
+      } catch { /* skip duplicate errors */ }
     }
+    if (upserted > 0) candlesUpdated += upserted;
   }
 
-  // ═══ 2. FEED MARKET SENTIMENT (funding, OI, orderbook + macro) ═══
-  for (const asset of cryptoAssets) {
+  // ═══ 2. FEED MARKET SENTIMENT (funding, OI, orderbook + macro) — parallelized ═══
+  const sentimentPromises = cryptoAssets.map(async (asset) => {
     try {
-      const sentiment = await computeSentiment(bybitClient, asset);
-      if (sentiment) {
-        sentimentCache.set(asset, sentiment);
-        sentimentsUpdated++;
-
-        // Persist to DB as AppSettings for dashboard / signal generation
-        await withRetry(
-          () => db.appSettings.upsert({
-            where: { key: `sentiment_${asset.replace('/', '_')}` },
-            create: {
-              key: `sentiment_${asset.replace('/', '_')}`,
-              value: JSON.stringify(sentiment),
-              description: `Market sentiment for ${asset}`,
-            },
-            update: { value: JSON.stringify(sentiment) },
-          }),
-          2, 500, `sentiment-${asset}`
-        );
-      }
+      const sentiment = await computeSentiment(bybitClient!, asset);
+      return { asset, sentiment };
     } catch (err: any) {
       errors.push(`Sentiment ${asset}: ${err.message}`);
+      return { asset, sentiment: null };
+    }
+  });
+
+  const sentimentResults = await Promise.allSettled(sentimentPromises);
+
+  for (const result of sentimentResults) {
+    if (result.status !== 'fulfilled') continue;
+    const { asset, sentiment } = result.value;
+    if (sentiment) {
+      sentimentCache.set(asset, sentiment);
+      sentimentsUpdated++;
+
+      // Persist to DB as AppSettings for dashboard / signal generation
+      await withRetry(
+        () => db.appSettings.upsert({
+          where: { key: `sentiment_${asset.replace('/', '_')}` },
+          create: {
+            key: `sentiment_${asset.replace('/', '_')}`,
+            value: JSON.stringify(sentiment),
+            description: `Market sentiment for ${asset}`,
+          },
+          update: { value: JSON.stringify(sentiment) },
+        }),
+        2, 500, `sentiment-${asset}`
+      );
     }
   }
 
