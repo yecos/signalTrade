@@ -229,6 +229,50 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
   );
   const config = configSetting ? JSON.parse(configSetting.value) : DEFAULT_CONFIG;
 
+  // ═══ CLEANUP: Close orphaned PENDING signals (no open Position/Trade) ═══
+  // These accumulate when Risk Manager rejects trades but signals stay PENDING
+  try {
+    const orphanedSignals = await db.signal.findMany({
+      where: { status: 'PENDING', source: 'AUTO' },
+      select: { id: true },
+    });
+
+    if (orphanedSignals.length > 0) {
+      // Check which ones have an open trade/position
+      const signalIds = orphanedSignals.map(s => s.id);
+      const openTrades = await db.trade.findMany({
+        where: {
+          signalId: { in: signalIds },
+          status: { in: ['OPEN', 'FILLED'] },
+        },
+        select: { signalId: true },
+      });
+      const tradedSignalIds = new Set(openTrades.map(t => t.signalId));
+
+      // Signals without open trades = orphaned
+      const orphanedIds = signalIds.filter(id => !tradedSignalIds.has(id));
+
+      if (orphanedIds.length > 0) {
+        await db.signal.updateMany({
+          where: { id: { in: orphanedIds }, status: 'PENDING' },
+          data: {
+            status: 'CLOSED',
+            result: 'DRAW',
+            verificationMethod: 'ORPHAN_CLEANUP',
+          },
+        });
+        log('INFO', `🧹 Cleaned up ${orphanedIds.length} orphaned PENDING signals (no open trade)`);
+      }
+    }
+  } catch (cleanupErr: any) {
+    log('WARN', `Signal cleanup failed: ${cleanupErr.message}`);
+  }
+
+  // Override maxConcurrentSignals from DB config to 50
+  if (config.maxConcurrentSignals && config.maxConcurrentSignals < 50) {
+    config.maxConcurrentSignals = 50;
+  }
+
   const result = await runAutoTraderCycle(config);
 
   // Update last check time
@@ -622,10 +666,7 @@ function startStatusServer(): Promise<void> {
           intervalMinutes: 5,
           expirationMinutes: 40, // Backtest-proven optimal (56.8% WR on liquidity_sweep)
           minSetupScore: 15,
-          maxConcurrentSignals: 20,
-          confidenceBoost: 0,
-          noOperarThreshold: 20,
-          strictMode: true, // Only trade proven edges — BLOCKED patterns never pass
+          maxConcurrentSignals: 50,
         };
         try {
           await db.appSettings.upsert({
@@ -777,7 +818,7 @@ async function main(): Promise<void> {
       intervalMinutes: 5,
       expirationMinutes: 40,
       minSetupScore: 15,
-      maxConcurrentSignals: 20,
+      maxConcurrentSignals: 50,
       confidenceBoost: 0,
       noOperarThreshold: 20,
       strictMode: true,
