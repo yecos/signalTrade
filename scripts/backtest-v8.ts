@@ -114,7 +114,7 @@ async function fetchFundingHistory(symbol: string, limit: number = 500): Promise
     if (data.retCode !== 0 || !data.result?.list) return [];
     return data.result.list.map((item: any) => ({
       fundingRate: parseFloat(item.fundingRate),
-      fundingTime: parseInt(item.fundingRateTimestamp) * 1000,
+      fundingTime: parseInt(item.fundingRateTimestamp), // Already in milliseconds
       markPrice: 0, // Not available in this endpoint
     }));
   } catch (err: any) {
@@ -153,18 +153,29 @@ async function backtestFundingArb(symbol: string, initialBalance: number = 10000
     return emptyResult('funding_arb', symbol);
   }
 
-  // Fetch Binance 8h candles to get real prices for each funding period
+  // Fetch Binance 1h candles for precise price lookup at each funding time
   const binanceSymbol = symbol; // BTCUSDT / ETHUSDT — same format on Binance
-  const candles8h = await fetchCandles(binanceSymbol, '8h', 200);
+  const candles1h = await fetchCandles(binanceSymbol, '1h', 500);
 
-  // Build price map: timestamp → close price
+  // Build price map: 1h timestamp → close price
   const priceMap = new Map<number, number>();
-  for (const c of candles8h) {
-    // Round to nearest 8h boundary (00:00, 08:00, 16:00 UTC)
-    const eightHours = 8 * 3600 * 1000;
-    const roundedTs = Math.round(c.timestamp / eightHours) * eightHours;
-    priceMap.set(roundedTs, c.close);
+  for (const c of candles1h) {
+    priceMap.set(c.timestamp, c.close);
   }
+
+  // Helper: find closest price to a given timestamp
+  const getPrice = (ts: number): number => {
+    // Try exact match first
+    const hourMs = 3600 * 1000;
+    const roundedHour = Math.floor(ts / hourMs) * hourMs;
+    if (priceMap.has(roundedHour)) return priceMap.get(roundedHour)!;
+    // Try ±1 hour
+    for (const offset of [1, -1, 2, -2, 3, -3]) {
+      const candidate = roundedHour + offset * hourMs;
+      if (priceMap.has(candidate)) return priceMap.get(candidate)!;
+    }
+    return 0;
+  };
 
   const trades: BacktestTrade[] = [];
   let balance = initialBalance;
@@ -179,14 +190,12 @@ async function backtestFundingArb(symbol: string, initialBalance: number = 10000
     const absFundingPct = Math.abs(funding.fundingRate) * 100;
 
     if (absFundingPct >= minFundingPct) {
-      // Find real entry price from Binance candles
-      const eightHours = 8 * 3600 * 1000;
-      const roundedTs = Math.round(funding.fundingTime / eightHours) * eightHours;
-      const entryPrice = priceMap.get(roundedTs) || 0;
+      // Find real entry price from Binance 1h candles
+      const entryPrice = getPrice(funding.fundingTime);
 
       // Find exit price (8h later)
-      const exitRoundedTs = roundedTs + eightHours;
-      const exitPrice = priceMap.get(exitRoundedTs) || entryPrice;
+      const eightHours = 8 * 3600 * 1000;
+      const exitPrice = getPrice(funding.fundingTime + eightHours) || entryPrice;
 
       // Cost: 2x maker fee (open + close) + basis risk
       const entryFee = positionSizeUsd * (makerFeePct / 100);
