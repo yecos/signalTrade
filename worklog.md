@@ -173,3 +173,23 @@ Stage Summary:
 - Balance shows $0 (need to deposit USDT to trade live)
 - Full auto-trader cycle generates signals correctly (NO_OPERAR during off-hours = correct behavior)
 - All API endpoints functional
+---
+Task ID: fix-cleanup-retry
+Agent: main
+Task: Fix position cleanup not persisting + maxOpenPositions 20/20 + Bybit API noise
+
+Work Log:
+- Diagnosed root cause: startup cleanup used engine.closePosition() one-by-one (5+ DB ops per position), which failed silently when Turso had "fetch failed" errors
+- Replaced startup cleanup with updateMany mass closure (3 operations total vs 100+)
+- Added verification step after cleanup that retries if positions remain open
+- Added withRetry() to execution engine's closePosition() critical DB operations
+- Fixed risk-manager maxOpenPositions from hardcoded max(config, 20) to max(config, account, 10)
+- Worker now syncs riskConfig appSettings with account.maxOpenPositions
+- Suppressed noisy Bybit "fetch failed" network error logs
+- Built and pushed to GitHub: commit e77e390
+
+Stage Summary:
+- Position cleanup is now atomic and reliable (updateMany instead of per-position)
+- maxOpenPositions fixed to 10 (was 20 in data collection mode)
+- Execution engine has retry logic for critical position close operations
+- Bybit API network errors are silent instead of flooding the console
