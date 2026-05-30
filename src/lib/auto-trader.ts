@@ -851,6 +851,20 @@ export async function generateAutoSignal(
     }
   }
   
+  // ═══ Step 8.5: Market Sentiment Adjustment ═══
+  // Use Bybit data (funding rate, OI, orderbook) to adjust confidence
+  if (direction !== 'NO_OPERAR') {
+    try {
+      const { getSentimentConfidenceAdjustment } = await import('./market-data-feeder');
+      const sentimentAdj = getSentimentConfidenceAdjustment(asset, direction);
+      if (sentimentAdj !== 0) {
+        const oldConf = confidence;
+        confidence = Math.min(100, Math.max(0, confidence + sentimentAdj));
+        reason += ` [Sentiment: ${sentimentAdj > 0 ? '+' : ''}${sentimentAdj}% → ${confidence.toFixed(0)}%]`;
+      }
+    } catch { /* sentiment data not available yet, skip */ }
+  }
+  
   // Step 9: Determine analysis mode
   const dataAvailability: Record<string, boolean> = {
     candles: candles.length >= 50,

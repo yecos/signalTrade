@@ -20,6 +20,7 @@ import { updateSetupStats, runAutoTraderCycle, DEFAULT_CONFIG, generateAutoSigna
 import { getExecutionEngine } from '../src/lib/execution-engine';
 import { getBrokerClientFromDB, BybitClient } from '../src/lib/broker-client';
 import { getOrCreateAccount, updateAccountBalance } from '../src/lib/risk-manager';
+import { feedMarketData, getAllSentiments, getSentimentConfidenceAdjustment } from '../src/lib/market-data-feeder';
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 const WORKER_PORT = parseInt(process.env.WORKER_PORT || '3111');
@@ -43,6 +44,7 @@ interface WorkerState {
   totalPositionsClosedSLTP: number;
   totalPositionsExpired: number;
   totalBalanceSyncs: number;
+  totalMarketDataFeeds: number;
   cycleHistory: Array<{
     time: string;
     duration_ms: number;
@@ -69,6 +71,7 @@ const state: WorkerState = {
   totalPositionsClosedSLTP: 0,
   totalPositionsExpired: 0,
   totalBalanceSyncs: 0,
+  totalMarketDataFeeds: 0,
   cycleHistory: [],
   engineStatus: null,
 };
@@ -619,6 +622,32 @@ async function runCycle(): Promise<void> {
   } catch (err: any) {
     log('ERROR', `Fase 4 error: ${err.message}`);
     errors++;
+  }
+
+  // ═══ Phase 5: Feed advanced market data from Bybit ═══
+  // Klines (candles), Open Interest, Funding Rate, Order Book, Instruments
+  try {
+    log('CYCLE', 'Fase 5: Alimentando datos avanzados de mercado...');
+    const feedResult = await feedMarketData();
+    state.totalMarketDataFeeds++;
+    if (feedResult.errors.length > 0) {
+      feedResult.errors.slice(0, 3).forEach(e => log('WARN', `  ⚠ ${e}`));
+    }
+
+    // Log sentiment summary
+    const sentiments = getAllSentiments();
+    const sentimentParts: string[] = [];
+    for (const [asset, s] of sentiments) {
+      sentimentParts.push(`${asset}: ${s.sentiment} (FR:${(s.fundingRate * 100).toFixed(4)}% OI:${s.oiChange1h >= 0 ? '+' : ''}${s.oiChange1h.toFixed(1)}% Spread:${s.spreadPct.toFixed(3)}%)`);
+    }
+    if (sentimentParts.length > 0) {
+      log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit, Sentimiento: ${sentimentParts.join(' | ')}`);
+    } else {
+      log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit actualizadas`);
+    }
+  } catch (err: any) {
+    log('WARN', `Fase 5: Market data feed error — ${err.message}`);
+    // Non-critical, don't count as error
   }
 
   const duration = Date.now() - startTime;

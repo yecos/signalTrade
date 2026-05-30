@@ -399,6 +399,136 @@ export class BybitClient {
     return result.success;
   }
 
+  // === ADVANCED MARKET DATA (Public, no auth required) ===
+
+  // Get order book depth (L2)
+  async getOrderBook(symbol: string, limit: number = 25): Promise<{
+    bids: Array<{ price: number; size: number }>;
+    asks: Array<{ price: number; size: number }>;
+    timestamp: number;
+  } | null> {
+    const result = await this.request('GET', '/v5/market/orderbook', {
+      category: 'linear',
+      symbol,
+      limit: limit.toString(),
+    });
+    if (!result.success || !result.result) return null;
+    return {
+      bids: (result.result.b || []).map((b: string[]) => ({ price: parseFloat(b[0]), size: parseFloat(b[1]) })),
+      asks: (result.result.a || []).map((a: string[]) => ({ price: parseFloat(a[0]), size: parseFloat(a[1]) })),
+      timestamp: result.result.ts,
+    };
+  }
+
+  // Get Open Interest
+  async getOpenInterest(symbol: string, interval: '5m' | '1h' | '1d' = '1h', limit: number = 30): Promise<Array<{
+    timestamp: string;
+    openInterest: number;
+  }>> {
+    const result = await this.request('GET', '/v5/market/open-interest', {
+      category: 'linear',
+      symbol,
+      interval,
+      limit: limit.toString(),
+    });
+    if (!result.success || !result.result?.list) return [];
+    return result.result.list.map((item: any) => ({
+      timestamp: item.timestamp,
+      openInterest: parseFloat(item.openInterest),
+    }));
+  }
+
+  // Get funding rate history
+  async getFundingHistory(symbol: string, limit: number = 30): Promise<Array<{
+    fundingRate: number;
+    fundingRateTimestamp: string;
+  }>> {
+    const result = await this.request('GET', '/v5/market/funding/history', {
+      category: 'linear',
+      symbol,
+      limit: limit.toString(),
+    });
+    if (!result.success || !result.result?.list) return [];
+    return result.result.list.map((item: any) => ({
+      fundingRate: parseFloat(item.fundingRate),
+      fundingRateTimestamp: item.fundingRateTimestamp,
+    }));
+  }
+
+  // Get klines (candles) from Bybit
+  async getKlines(symbol: string, interval: string = '5', limit: number = 200): Promise<Array<{
+    timestamp: number;
+    open: number;
+    high: number;
+    low: number;
+    close: number;
+    volume: number;
+  }>> {
+    const result = await this.request('GET', '/v5/market/kline', {
+      category: 'linear',
+      symbol,
+      interval,
+      limit: limit.toString(),
+    });
+    if (!result.success || !result.result?.list) return [];
+    return result.result.list.map((k: string[]) => ({
+      timestamp: parseInt(k[0]),
+      open: parseFloat(k[1]),
+      high: parseFloat(k[2]),
+      low: parseFloat(k[3]),
+      close: parseFloat(k[4]),
+      volume: parseFloat(k[5]),
+    }));
+  }
+
+  // Get recent trades
+  async getRecentTrades(symbol: string, limit: number = 50): Promise<Array<{
+    price: number;
+    size: number;
+    side: string;
+    time: string;
+  }>> {
+    const result = await this.request('GET', '/v5/market/recent-trade', {
+      category: 'linear',
+      symbol,
+      limit: limit.toString(),
+    });
+    if (!result.success || !result.result?.list) return [];
+    return result.result.list.map((t: any) => ({
+      price: parseFloat(t.price),
+      size: parseFloat(t.size),
+      side: t.side,
+      time: t.time,
+    }));
+  }
+
+  // Get instrument specifications (tick size, lot size, leverage)
+  async getInstruments(symbol?: string): Promise<Array<{
+    symbol: string;
+    baseCoin: string;
+    quoteCoin: string;
+    minOrderQty: number;
+    maxOrderQty: number;
+    qtyStep: number;
+    tickSize: number;
+    maxLeverage: number;
+  }>> {
+    const params: Record<string, string | number> = { category: 'linear' };
+    if (symbol) params.symbol = symbol;
+    const result = await this.request('GET', '/v5/market/instruments-info', params);
+    if (!result.success || !result.result?.list) return [];
+    return result.result.list.map((i: any) => ({
+      symbol: i.symbol,
+      baseCoin: i.baseCoin,
+      quoteCoin: i.quoteCoin,
+      minOrderQty: parseFloat(i.lotSizeFilter?.minimumOrderQty || '0'),
+      maxOrderQty: parseFloat(i.lotSizeFilter?.maximumOrderQty || '0'),
+      qtyStep: parseFloat(i.lotSizeFilter?.qtyStep || '0.001'),
+      tickSize: parseFloat(i.priceFilter?.tickSize || '0.01'),
+      maxLeverage: parseFloat(i.leverageFilter?.maxLeverage || '1'),
+    }));
+  }
+
   // === HEALTH CHECK ===
 
   async checkConnection(): Promise<{ ok: boolean; latency: number; serverTime?: number }> {
