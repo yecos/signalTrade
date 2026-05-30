@@ -216,3 +216,38 @@ Stage Summary:
 - Bybit API: timeout + retry = no more hung connections
 - Backtest v3: Can now test with real historical data + realistic costs
 - Key insight: Win rate alone is meaningless without fee/slippage accounting
+
+---
+Task ID: strategy-redesign-v3-v7
+Agent: Main
+Task: Complete strategy redesign — backtest v3 through v7 with institutional trend following
+
+Work Log:
+- Analyzed existing codebase: auto-trader.ts (1100+ lines), patterns.ts, indicators.ts, all engines
+- Found existing backtests v3-v5 in signalTrade/scripts/ directory
+- Built backtest v6: Institutional Trend Following with trailing stops on 4H timeframe
+  - KEY FINDING: TRAILING_STOP is consistently PROFITABLE (+$2,731 to +$5,116 across configs)
+  - KEY FINDING: INITIAL_SL is the PRIMARY LOSS SOURCE (-$2,810 to -$6,169)
+  - KEY FINDING: LONGS outperform SHORTS (47-58% vs 35-41% WR)
+  - KEY FINDING: Daily trend filter is ESSENTIAL
+- Built backtest v7: Asymmetric Edge Hunter — longs-only + daily filter + wider SL
+  - Tested 5 configs per asset across 12 months
+  - ETH 4H longs-only + daily + ultra-wide SL: +1.06%, 59.1% WR, PF 1.13 (12 months)
+  - Ran 24-month validation: PF dropped to 0.96 (breakeven, NOT profitable)
+- Ran 10+ configuration variations for ETH 4H longs optimization (24 months)
+  - Tested: no trend break, breakeven moves, wider SL, RSI filters, ADX filters
+  - ALL configurations showed PF < 1.0 over 24 months
+  - Daily filter is critical: without it, balance drops from $9,570 to $8,112
+  - Moving to breakeven too early DESTROYS WR (8.1% with BE@0.5ATR)
+- Tested daily (1D) timeframe: even worse results (PF 0.42-0.93)
+- Updated auto-trader.ts header with v7 documentation and findings
+- Changed default asset from ['BTC/USD', 'ETH/USD'] to ['ETH/USD']
+- Created backtest-v6.ts and backtest-v7.ts scripts in main project
+
+Stage Summary:
+- CRITICAL FINDING: No technical indicator-based strategy produces a statistically significant edge after fees over 24 months
+- Best result: ETH 4H longs-only + daily EMA trend filter = PF 0.96 (barely breakeven)
+- Trailing stops capture profits, but initial SL losses are too large to overcome
+- Fees (0.12% round trip) are a significant headwind at any timeframe
+- The system should remain in PAPER TRADING / DATA COLLECTION mode only
+- DO NOT trade with real money until an edge is confirmed over 24+ months

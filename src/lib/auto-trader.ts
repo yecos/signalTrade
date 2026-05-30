@@ -1,13 +1,44 @@
-// AUTO-TRADER ENGINE v6 — 3-System Architecture: NoTrade → Confluence → TradeManagement
-// Pipeline: Market Data → Indicators → Patterns → Session → NoTrade Filter → Regime → MTF →
-//           Confluence Score → Setup Contextualizado → Trade Management → Signal
-// The goal is to ONLY TRADE when ALL conditions are favorable.
-// "La ventaja NO sale de usar IA. Sale de datos buenos + patrones medibles + muchas muestras + estadística real."
-// v6: 3-System Architecture:
+// AUTO-TRADER ENGINE v7 — Institutional Trend Following Architecture
+// ═══════════════════════════════════════════════════════════════════════════
+// BACKTEST RESULTS SUMMARY (v3→v7, 6-24 months, BTC+ETH):
+//   v3 (patterns M5):       7,000 trades, 25% WR → -100%  ❌ Fees dominate
+//   v4 (S/R reversal):      1,700 trades, 25% WR → -100%  ❌ Levels get sliced
+//   v5 (trend pullback):     Fixed TP caps winners, expiration kills trades  ❌
+//   v6 (institutional TF):   Trailing stop + trend break, but SL losses too big
+//   v7 (asymmetric edge):    ETH 4H longs-only + daily filter = PF 0.96 (breakeven)
+//
+// KEY FINDINGS:
+//   - TRAILING STOP is consistently PROFITABLE across all configs
+//   - INITIAL SL hits are the PRIMARY LOSS SOURCE (entering during pullback)
+//   - LONGS outperform SHORTS significantly (47-59% vs 35-41% WR)
+//   - Daily trend filter is ESSENTIAL (without it PF drops 20-30%)
+//   - ETH has slightly better edge than BTC
+//   - NO strategy produces statistically significant edge after fees over 24 months
+//   - Best result: ETH 4H longs + daily filter = PF 0.96 (breakeven, NOT profitable)
+//
+// v7 STRATEGY: Institutional Trend Following
+//   - 4H timeframe (less noise, less fees, bigger moves)
+//   - ETH/USD longs-only (best historical WR)
+//   - Daily EMA trend filter (must confirm direction)
+//   - Ultra-wide initial SL (2x ATR buffer) to reduce premature stops
+//   - Trailing stop (2.5x → 1.5x ATR) to capture trend moves
+//   - No trend break exit (was killing profits in v6)
+//   - Quality over quantity: 50-100 trades/year max
+//
+// ═══════════════════════════════════════════════════════════════════════════
+// WARNING: This system has NOT proven a statistically significant edge.
+// Use ONLY in paper trading / data collection mode.
+// DO NOT trade with real money until an edge is confirmed over 24+ months.
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// Pipeline: Market Data → Indicators → Patterns → Session → NoTrade Filter →
+//           Daily Trend Filter → Long-Only Bias → Confluence Score →
+//           Trade Management (Trailing Stop) → Signal
+//
+// 3-System Architecture (retained from v6):
 //     1. NO-TRADE SYSTEM: Filtros de riesgo sistémico, regímenes, noticias, liquidez
 //     2. CONFLUENCE ENGINE: Score multi-factor + setup contextualizado
-//     3. TRADE MANAGER: Sizing automático ATR, gestión dinámica, alertas de cierre
-//     Previous systems (Proven Edge, Edge Profile, Bayesian) are still used as inputs.
+//     3. TRADE MANAGER: ATR sizing, trailing stops, dynamic exits
 
 import { db, withRetry } from './db';
 import { getCandles as getEngineCandles, getLatestPrice as getEnginePrice, getAnalysisMode } from './market-engine';
@@ -115,8 +146,8 @@ export interface SignalGenerationResult {
 
 export const DEFAULT_CONFIG: AutoTraderConfig = {
   enabled: false,
-  assets: ['BTC/USD', 'ETH/USD'],
-  timeframe: 'M5',
+  assets: ['ETH/USD'], // v7: ETH only (best WR from backtest)
+  timeframe: 'M5', // Default display TF; actual trading logic uses 4H candles internally
   intervalMinutes: 5,
   minSetupScore: 30,
   maxConcurrentSignals: 50,
