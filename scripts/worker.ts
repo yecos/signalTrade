@@ -1207,17 +1207,29 @@ async function main(): Promise<void> {
       log('WARN', `  ⚠️ Error aplicando config: ${err.message}`);
     }
 
-    // Activate auto-trader
+    // ═══ DISABLE old auto-trader (v7 patterns have NO EDGE) ═══
+    // The pattern-based system (v3-v7) has 25-34% WR and -91% to -100% returns.
+    // Only the Strategy Manager with Mean Reversion ETHUSDT 1H has proven edge.
     try {
       await db.appSettings.upsert({
         where: { key: 'autoTraderRunning' },
-        create: { key: 'autoTraderRunning', value: 'true', description: 'Auto-trader running' },
-        update: { value: 'true' },
+        create: { key: 'autoTraderRunning', value: 'false', description: 'Auto-trader disabled — using Strategy Manager instead' },
+        update: { value: 'false' },
       });
-      state.autoTraderEnabled = true;
-      log('INFO', '  ✅ Auto-Trader ACTIVADO automáticamente');
+      state.autoTraderEnabled = false;
+      log('INFO', '  ⏹ Auto-Trader V7 DESACTIVADO (patrones sin edge)');
     } catch (err: any) {
-      log('WARN', `  ⚠️ Error activando auto-trader: ${err.message}`);
+      log('WARN', `  ⚠️ Error desactivando auto-trader: ${err.message}`);
+    }
+
+    // ═══ ACTIVATE Strategy Manager with Mean Reversion ═══
+    try {
+      const { applyPreset } = await import('../src/lib/strategy-manager');
+      // DRY_RUN preset: scans + generates signals but uses PaperTradingClient
+      await applyPreset('DRY_RUN');
+      log('INFO', '  ⭐ Strategy Manager ACTIVADO — Mean Reversion ETHUSDT 1H (paper trading)');
+    } catch (err: any) {
+      log('WARN', `  ⚠️ Error activando Strategy Manager: ${err.message}`);
     }
 
     // Enable auto-execution in PAPER mode
@@ -1225,21 +1237,48 @@ async function main(): Promise<void> {
 
     log('INFO', '🚀 AUTO-START completo — Worker listo para operar');
     log('INFO', '');
-    log('INFO', '  📊 PROVEN EDGE (Backtest v8.1):');
-    log('INFO', '    ⭐ Mean Reversion ETHUSDT 1H — PF 2.32, WR 62.3%, Sharpe 6.04, +$130.88');
-    log('INFO', '    ✅ Grid Trading ETHUSDT 15m — PF 3.17, WR 97.4% (ranging only)');
-    log('INFO', '    ❌ Funding Arb — Data issues, 0% WR (disabled)');
-    log('INFO', '    ❌ Pattern-based (v3-v7) — NO EDGE (25-34% WR, -91% to -100%)');
-    log('INFO', '  💡 Preset: /strategy-preset?preset=CONSERVATIVE para Mean Reversion con capital real');
+    log('INFO', '  📊 ESTRATEGIA ACTIVA:');
+    log('INFO', '    ⭐ Mean Reversion ETHUSDT 1H — PF 2.32, WR 62.3%, Sharpe 6.04');
+    log('INFO', '    ✅ Paper Trading (sin capital real)');
+    log('INFO', '    ❌ Auto-Trader V7 DESACTIVADO (sin edge probado)');
+    log('INFO', '');
+    log('INFO', '  💡 Comandos:');
+    log('INFO', '    /strategies           → Ver dashboard de estrategias');
+    log('INFO', '    /strategy-preset?preset=CONSERVATIVE → Operar con capital real');
     log('INFO', '');
   } else {
-    // Check auto-trader state from DB
+    // ═══ Non-auto mode: still configure for proven strategy ═══
+    // Check auto-trader state from DB, but recommend Strategy Manager
     try {
       const runningSetting = await db.appSettings.findUnique({ where: { key: 'autoTraderRunning' } });
       state.autoTraderEnabled = runningSetting?.value === 'true';
-      log('INFO', `Auto-Trader: ${state.autoTraderEnabled ? '✅ ACTIVADO' : '⏹ Desactivado (actívalo con --auto o http://localhost:' + STATUS_PORT + '/activate)'}`);
+
+      if (state.autoTraderEnabled) {
+        // Auto-trader is on — warn that it has no edge, suggest disabling
+        log('INFO', `⚠️ Auto-Trader V7 está ACTIVADO pero NO tiene edge probado (25-34% WR)`);
+        log('INFO', `💡 Recomendado: desactívalo y usa el Strategy Manager:`);
+        log('INFO', `   curl http://localhost:${STATUS_PORT}/strategy-preset?preset=DRY_RUN`);
+      } else {
+        log('INFO', `Auto-Trader V7: ⏹ Desactivado`);
+      }
     } catch {
-      log('INFO', `Auto-Trader: ⏹ Desactivado (actívalo con --auto o http://localhost:${STATUS_PORT}/activate)`);
+      log('INFO', `Auto-Trader V7: ⏹ Desactivado`);
+    }
+
+    // Check if Strategy Manager is already configured
+    try {
+      const { getStrategyManagerConfig, applyPreset, initializeStrategyManager } = await import('../src/lib/strategy-manager');
+      const initResult = await initializeStrategyManager();
+      const strategyConfig = getStrategyManagerConfig();
+
+      if (strategyConfig.enabled && strategyConfig.meanReversion.enabled) {
+        log('INFO', `⭐ Strategy Manager: ✅ ACTIVADO — Mean Reversion ETHUSDT 1H`);
+      } else {
+        log('INFO', `Strategy Manager: ⏹ No configurado. Actívalo con:`);
+        log('INFO', `   curl http://localhost:${STATUS_PORT}/strategy-preset?preset=DRY_RUN`);
+      }
+    } catch (err: any) {
+      log('WARN', `Strategy Manager check failed: ${err.message}`);
     }
   }
 

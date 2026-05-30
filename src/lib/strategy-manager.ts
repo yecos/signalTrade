@@ -145,8 +145,8 @@ export interface StrategyDashboard {
 // === DEFAULT CONFIG ===
 
 export const DEFAULT_STRATEGY_MANAGER_CONFIG: StrategyManagerConfig = {
-  enabled: true, // CHANGED: Now enabled by default — we have a proven edge
-  fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest
+  enabled: true, // Enabled by default — we have a proven edge
+  fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest, needs real API
   gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: false }, // Fragile in trending markets
   meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true }, // PROVEN: PF 2.32, WR 62.3%, Sharpe 6.04
   orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true }, // Context/confirmation layer
@@ -155,7 +155,7 @@ export const DEFAULT_STRATEGY_MANAGER_CONFIG: StrategyManagerConfig = {
   circuitBreakerPct: 5,
   regimeAdaptive: true,
   sessionAware: true,
-  dryRun: true, // SAFE: Default to dry run (use CONSERVATIVE preset for real)
+  dryRun: false, // false = execute through broker (PaperTradingClient if no API keys = paper trading)
 };
 
 // === IN-MEMORY STATE ===
@@ -539,11 +539,11 @@ export async function applyPreset(preset: 'CONSERVATIVE' | 'MODERATE' | 'AGGRESS
       managerConfig = {
         ...DEFAULT_STRATEGY_MANAGER_CONFIG,
         enabled: true,
-        dryRun: true,
-        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest
-        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: true },
+        dryRun: false, // false = actually execute through broker (PaperTradingClient if no API keys)
+        fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest, needs real API
+        gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: false }, // Fragile in trending markets
         meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true, timeframe: 'H1' }, // H1 proven
-        orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true },
+        orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true }, // Context layer only
       };
       break;
     case 'CONSERVATIVE':

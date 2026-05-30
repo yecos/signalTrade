@@ -19,7 +19,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { db, withRetry } from './db';
-import { BybitClient, getBrokerClientFromDB, assetToSymbol, type BrokerConfig } from './broker-client';
+import { BybitClient, PaperTradingClient, getBrokerClientFromDB, assetToSymbol, type BrokerConfig } from './broker-client';
 
 // === TYPES ===
 
@@ -114,16 +114,11 @@ let arbStats: FundingArbStats = {
 
 // === GET BYBIT CLIENT ===
 
-async function getBybitClient(): Promise<BybitClient> {
-  const broker = await getBrokerClientFromDB();
-  if (broker instanceof BybitClient) return broker;
-  // Fallback: public client for scanning
-  return new BybitClient({
-    broker: 'BYBIT',
-    apiKey: process.env.BYBIT_API_KEY || 'public',
-    apiSecret: process.env.BYBIT_API_SECRET || 'public',
-    testnet: process.env.BYBIT_TESTNET !== 'false',
-  });
+type BrokerClient = BybitClient | PaperTradingClient;
+
+async function getBybitClient(): Promise<BrokerClient> {
+  // Use the same broker resolution as the rest of the app
+  return getBrokerClientFromDB();
 }
 
 // === SCAN FUNDING RATES ===
@@ -133,6 +128,11 @@ export async function scanFundingOpportunities(config?: Partial<FundingArbConfig
   const cfg = { ...DEFAULT_FUNDING_ARB_CONFIG, ...config };
   const client = await getBybitClient();
   const results: FundingArbScanResult[] = [];
+
+  // Funding arb requires BybitClient for real market data (PaperTradingClient doesn't support funding history)
+  if (!(client instanceof BybitClient)) {
+    return results; // Return empty — can't scan funding rates without real API
+  }
 
   for (const asset of cfg.assets) {
     try {

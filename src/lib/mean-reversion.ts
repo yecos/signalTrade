@@ -16,7 +16,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { db, withRetry } from './db';
-import { BybitClient, getBrokerClientFromDB, assetToSymbol } from './broker-client';
+import { BybitClient, PaperTradingClient, getBrokerClientFromDB, assetToSymbol } from './broker-client';
 import { computeAllIndicators, type IndicatorSnapshot } from './indicators';
 import { getCandles as getDBCandles } from './market-data';
 import { detectRegime, type RegimeResult } from './regime-engine';
@@ -379,7 +379,7 @@ export async function executeMeanReversionTrade(
 
     // Place order
     const side = signal.direction === 'HIGHER' ? 'Buy' : 'Sell';
-    const result = await client.placeOrder({
+    const result = await clientPlaceOrder(client, {
       symbol,
       side,
       orderType: cfg.useLimitOrders ? 'Limit' : 'Market',
@@ -389,7 +389,7 @@ export async function executeMeanReversionTrade(
       takeProfit: signal.takeProfit,
       category: 'linear',
       timeInForce: cfg.useLimitOrders ? 'PostOnly' : 'IOC',
-    });
+    }, signal.entryPrice);
 
     if (!result.success) {
       console.error(`[MEAN-REV] Order failed: ${result.rejectReason}`);
@@ -476,7 +476,7 @@ export async function monitorMeanReversionPositions(config?: Partial<MeanReversi
 
     try {
       const symbol = assetToSymbol(asset);
-      const ticker = await client.getTicker(symbol, 'linear');
+      const ticker = await getClientTicker(client, symbol);
       if (!ticker) {
         errors.push(`No ticker for ${asset}`);
         continue;
@@ -512,15 +512,19 @@ export async function monitorMeanReversionPositions(config?: Partial<MeanReversi
             if (newTrail > position.trailingStop) {
               position.trailingStop = newTrail;
               trailingStopsUpdated++;
-              // Update SL on exchange
-              await client.setStopLoss(symbol, newTrail, position.takeProfit);
+              // Update SL on exchange (only works with BybitClient, PaperTrading tracks internally)
+              if (client instanceof BybitClient) {
+                await client.setStopLoss(symbol, newTrail, position.takeProfit);
+              }
             }
           } else {
             const newTrail = currentPrice + trailDistance;
             if (newTrail < position.trailingStop || position.trailingStop === position.stopLoss) {
               position.trailingStop = newTrail;
               trailingStopsUpdated++;
-              await client.setStopLoss(symbol, newTrail, position.takeProfit);
+              if (client instanceof BybitClient) {
+                await client.setStopLoss(symbol, newTrail, position.takeProfit);
+              }
             }
           }
         }
@@ -537,7 +541,7 @@ export async function monitorMeanReversionPositions(config?: Partial<MeanReversi
 
       if (slHit || tpHit) {
         const closeSide = position.direction === 'HIGHER' ? 'Sell' : 'Buy';
-        const closeResult = await client.closePosition(symbol, position.direction === 'HIGHER' ? 'Buy' : 'Sell', position.quantity);
+        const closeResult = await clientClosePosition(client, symbol, position.direction === 'HIGHER' ? 'Buy' : 'Sell', position.quantity, currentPrice);
 
         position.status = 'CLOSED';
         position.closedAt = new Date();
@@ -642,15 +646,45 @@ export function getOpenMRPositions(): MeanReversionPosition[] {
 
 // === HELPERS ===
 
-async function getBybitClient(): Promise<BybitClient> {
-  const broker = await getBrokerClientFromDB();
-  if (broker instanceof BybitClient) return broker;
-  return new BybitClient({
-    broker: 'BYBIT',
-    apiKey: process.env.BYBIT_API_KEY || 'public',
-    apiSecret: process.env.BYBIT_API_SECRET || 'public',
-    testnet: process.env.BYBIT_TESTNET !== 'false',
-  });
+type BrokerClient = BybitClient | PaperTradingClient;
+
+async function getBybitClient(): Promise<BrokerClient> {
+  // Use the same broker resolution as the rest of the app.
+  // If no real API keys → PaperTradingClient (simulates orders)
+  // If real API keys → BybitClient (real exchange)
+  return getBrokerClientFromDB();
+}
+
+// Wrapper: get last price for a symbol (works with both client types)
+async function getClientLastPrice(client: BrokerClient, symbol: string): Promise<number | null> {
+  if (client instanceof PaperTradingClient) {
+    return client.getLastPrice(symbol);
+  }
+  return client.getLastPrice(symbol);
+}
+
+// Wrapper: get ticker (works with both client types)
+async function getClientTicker(client: BrokerClient, symbol: string): Promise<{ lastPrice: number; fundingRate?: number } | null> {
+  if (client instanceof PaperTradingClient) {
+    return client.getTicker(symbol);
+  }
+  return client.getTicker(symbol, 'linear');
+}
+
+// Wrapper: place order (works with both client types)
+async function clientPlaceOrder(client: BrokerClient, order: import('./broker-client').OrderRequest, currentPrice?: number): Promise<import('./broker-client').OrderResult> {
+  if (client instanceof PaperTradingClient) {
+    return client.placeOrder(order, currentPrice || order.price);
+  }
+  return client.placeOrder(order);
+}
+
+// Wrapper: close position (works with both client types)
+async function clientClosePosition(client: BrokerClient, symbol: string, side: 'Buy' | 'Sell', quantity: number, currentPrice: number): Promise<import('./broker-client').OrderResult> {
+  if (client instanceof PaperTradingClient) {
+    return client.closePosition(symbol, currentPrice);
+  }
+  return client.closePosition(symbol, side, quantity);
 }
 
 async function persistMRPosition(position: MeanReversionPosition): Promise<void> {
