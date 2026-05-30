@@ -146,3 +146,26 @@ Stage Summary:
 - Market quality should stay HIGH instead of degrading to MEDIUM
 - DB operations less likely to overload Turso (batched upserts)
 - 3 files modified: market-data-feeder.ts, market-engine.ts, broker-client.ts
+---
+Task ID: fix-fetch-failed-v4
+Agent: main
+Task: Fix persistent Bybit "fetch failed" — switch klines to Binance (proven reliable), Bybit for extras only
+
+Work Log:
+- DIAGNOSED: Bybit API is unreliable from user's network (Colombia). v3 rate limiter reduced errors from 8→3 but didn't eliminate them.
+- KEY INSIGHT: Phase 3 (market-engine) uses Binance/CoinGecko and ALWAYS works. Phase 5 (feeder) used Bybit exclusively and always failed.
+- REWRITE market-data-feeder.ts to v4:
+  - Binance as PRIMARY source for klines/candles (same endpoints that work in Phase 3)
+  - Binance 24h ticker for price/volume/spread (reliable)
+  - Binance klines for 1h price change calculation
+  - Bybit ONLY for: funding rate, open interest, orderbook (unique Bybit data)
+  - Graceful degradation: if Bybit unavailable, sentiment still computed from Binance data
+  - Bybit calls fully sequential with 1s delays — only called if first Bybit request succeeds
+  - Added dataSource tracking: 'BINANCE', 'BYBIT', or 'MIXED'
+  - Added [FEEDER] v4 summary log line for easy debugging
+
+Stage Summary:
+- Klines now come from Binance (proven reliable from user's network) — should eliminate all fetch failed
+- Bybit only used for optional extras (OI, funding, orderbook) — graceful degradation if it fails
+- If Bybit completely fails, sentiment still computed with price/volume/macro data from Binance
+- This is the definitive fix for the Bybit connectivity issue

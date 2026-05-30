@@ -1,23 +1,16 @@
-// MARKET DATA FEEDER v3 — Alimenta la app con datos avanzados de mercado
+// MARKET DATA FEEDER v4 — Alimenta la app con datos avanzados de mercado
 // Fuentes de datos:
-// 1. Bybit API (público, sin API key): Velas, Ticker, OI, Funding, Orderbook, Instrumentos
-// 2. CoinGecko API (público): Fear & Greed Index, BTC Dominance, Market Cap Global
-// 3. Datos derivados: Sentimiento compuesto, calidad de liquidez, presión direccional
+// 1. Binance API (público, sin API key): Velas — PRIMARIO porque funciona desde cualquier red
+// 2. Bybit API (público, sin API key): Ticker, OI, Funding, Orderbook — solo para datos que Binance no tiene
+// 3. CoinGecko API (público): Fear & Greed Index, BTC Dominance, Market Cap Global
+// 4. Datos derivados: Sentimiento compuesto, calidad de liquidez, presión direccional
 //
-// Cómo mejoran las señales:
-// - Fear & Greed < 25 (miedo extremo) → posible reversión alcista
-// - Fear & Greed > 75 (codicia extrema) → posible reversión bajista
-// - BTC Dominance subiendo + alts bajando → risk-off, evitar ETH
-// - OI creciente + funding positivo = presión compradora (confirma HIGHER)
-// - OI decreciente + funding negativo = presión vendedora (confirma LOWER)
-// - Spread estrecho = buena liquidez (mejor fill)
-// - Spread ancho = liquidez baja (evitar entrada)
-//
-// v3 CHANGES:
-// - Rate-limited Bybit API calls (max 3 concurrent) to prevent fetch failed
-// - Batched DB upserts (chunks of 10) to avoid Turso overload
-// - Sequential Bybit request groups with delays between groups
-// - Improved error recovery with fallback data
+// v4 CHANGES (from v3):
+// - Binance as PRIMARY source for klines (Bybit was unreliable from user's network)
+// - Bybit reserved only for: ticker, OI, funding, orderbook (unique data)
+// - Bybit calls fully sequential with 1s delays — never more than 1 at a time
+// - Graceful degradation: if Bybit fails, sentiment still computed with price from Binance
+// - Binance klines fetched with proper error handling and retry
 
 import { db, withRetry } from './db';
 import { BybitClient, getBrokerClientFromDB, assetToSymbol, isCryptoAsset } from './broker-client';
@@ -34,29 +27,31 @@ export interface MarketSentiment {
   spread: number;
   spreadPct: number;
   volume24h: number;
-  priceChange1h: number;     // % change in last hour (from klines)
-  priceChange24h: number;    // % change from ticker
+  priceChange1h: number;
+  priceChange24h: number;
   // Funding
-  fundingRate: number;         // Current funding rate
-  fundingRateAvg: number;      // Average last 8h (3 periods)
+  fundingRate: number;
+  fundingRateAvg: number;
   // Open Interest
-  openInterest: number;        // Current OI
-  oiChange1h: number;          // OI change % in last hour
-  oiChange24h: number;         // OI change % in last 24h
+  openInterest: number;
+  oiChange1h: number;
+  oiChange24h: number;
   // Order Book
-  bidDepth: number;            // Total bid volume (top 25 levels)
-  askDepth: number;            // Total ask volume (top 25 levels)
-  depthImbalance: number;      // (bidDepth - askDepth) / (bidDepth + askDepth) — -1 to +1
-  // Macro (shared across all assets)
-  fearGreedIndex: number;      // 0-100 (0=Extreme Fear, 100=Extreme Greed)
-  fearGreedLabel: string;      // "Extreme Fear" | "Fear" | "Neutral" | "Greed" | "Extreme Greed"
-  btcDominance: number;        // BTC market cap dominance %
-  totalMarketCap: number;      // Total crypto market cap in USD
-  totalVolume24h: number;      // Total 24h volume in USD
+  bidDepth: number;
+  askDepth: number;
+  depthImbalance: number;
+  // Macro
+  fearGreedIndex: number;
+  fearGreedLabel: string;
+  btcDominance: number;
+  totalMarketCap: number;
+  totalVolume24h: number;
   // Derived signals
   sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   liquidityQuality: 'HIGH' | 'MEDIUM' | 'LOW';
-  pressureScore: number;       // -100 to +100 composite directional pressure
+  pressureScore: number;
+  // Data source tracking
+  dataSource: 'BYBIT' | 'BINANCE' | 'MIXED';
 }
 
 export interface MacroData {
@@ -75,37 +70,119 @@ let macroCache: MacroData | null = null;
 let instrumentsCache: Map<string, { tickSize: number; minOrderQty: number; qtyStep: number }> = new Map();
 let lastCacheUpdate = 0;
 let lastMacroUpdate = 0;
-const CACHE_TTL_MS = 60_000; // 1 minute
-const MACRO_CACHE_TTL_MS = 300_000; // 5 minutes (macro data changes slowly)
+const CACHE_TTL_MS = 60_000;
+const MACRO_CACHE_TTL_MS = 300_000;
 
-// === RATE LIMITER ===
-// Prevents overwhelming Bybit API with too many concurrent requests
-// Max 3 concurrent, 500ms delay between request groups
+// === BINANCE KLINES (PRIMARY SOURCE — reliable from any network) ===
 
-const MAX_CONCURRENT_BYBIT = 3;
-const INTER_GROUP_DELAY_MS = 500;
+const BINANCE_ENDPOINTS = [
+  'https://data-api.binance.vision/api/v3',
+  'https://api.binance.us/api/v3',
+  'https://api1.binance.com/api/v3',
+  'https://api2.binance.com/api/v3',
+  'https://api3.binance.com/api/v3',
+];
 
-async function runWithConcurrencyLimit<T>(
-  tasks: Array<() => Promise<T>>,
-  maxConcurrent: number = MAX_CONCURRENT_BYBIT
-): Promise<Array<T | { __error: string }>> {
-  const results: Array<T | { __error: string }> = [];
-  let taskIndex = 0;
+const BINANCE_SYMBOLS: Record<string, string> = {
+  'BTC/USD': 'BTCUSDT',
+  'ETH/USD': 'ETHUSDT',
+};
 
-  async function worker(): Promise<void> {
-    while (taskIndex < tasks.length) {
-      const index = taskIndex++;
-      try {
-        results[index] = await tasks[index]();
-      } catch (err: any) {
-        results[index] = { __error: err.message || 'Unknown error' };
-      }
-    }
+const BINANCE_INTERVALS: Record<string, string> = {
+  'M5': '5m', 'M15': '15m', 'H1': '1h', 'H4': '4h',
+};
+
+interface BinanceKline {
+  timestamp: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+async function fetchBinanceKlines(symbol: string, interval: string, limit: number = 200): Promise<BinanceKline[]> {
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const url = `${baseUrl}/klines?symbol=${symbol}&interval=${interval}&limit=${limit}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(10000),
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (!Array.isArray(data) || data.length === 0) continue;
+
+      return data.map((k: any[]) => ({
+        timestamp: Number(k[0]),
+        open: parseFloat(String(k[1])),
+        high: parseFloat(String(k[2])),
+        low: parseFloat(String(k[3])),
+        close: parseFloat(String(k[4])),
+        volume: parseFloat(String(k[5])),
+      }));
+    } catch { continue; }
   }
+  return [];
+}
 
-  const workers = Array.from({ length: Math.min(maxConcurrent, tasks.length) }, () => worker());
-  await Promise.all(workers);
-  return results;
+async function fetchBinancePrice(symbol: string): Promise<number | null> {
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const url = `${baseUrl}/ticker/price?symbol=${symbol}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(8000),
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.price) return parseFloat(data.price);
+    } catch { continue; }
+  }
+  return null;
+}
+
+async function fetchBinanceBookTicker(symbol: string): Promise<{ bid: number; ask: number; spread: number } | null> {
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const url = `${baseUrl}/ticker/bookTicker?symbol=${symbol}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(8000),
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      const bid = parseFloat(data.bidPrice);
+      const ask = parseFloat(data.askPrice);
+      if (bid > 0 && ask > 0) return { bid, ask, spread: ask - bid };
+    } catch { continue; }
+  }
+  return null;
+}
+
+async function fetchBinance24hTicker(symbol: string): Promise<{
+  lastPrice: number; volume: number; priceChangePercent: number;
+  bidPrice: number; askPrice: number;
+} | null> {
+  for (const baseUrl of BINANCE_ENDPOINTS) {
+    try {
+      const url = `${baseUrl}/ticker/24hr?symbol=${symbol}`;
+      const res = await fetch(url, {
+        signal: AbortSignal.timeout(8000),
+        headers: { Accept: 'application/json' },
+      });
+      if (!res.ok) continue;
+      const data = await res.json();
+      return {
+        lastPrice: parseFloat(data.lastPrice),
+        volume: parseFloat(data.volume),
+        priceChangePercent: parseFloat(data.priceChangePercent),
+        bidPrice: parseFloat(data.bidPrice),
+        askPrice: parseFloat(data.askPrice),
+      };
+    } catch { continue; }
+  }
+  return null;
 }
 
 // Delay helper
@@ -124,16 +201,15 @@ export async function feedMarketData(): Promise<{
   let candlesUpdated = 0;
   let sentimentsUpdated = 0;
 
-  // Get Bybit client (public endpoints work without API keys too)
+  // Get Bybit client for OI/funding/orderbook (optional — graceful degradation)
   let bybitClient: BybitClient | null = null;
   try {
     const broker = await getBrokerClientFromDB();
     if (broker instanceof BybitClient) {
       bybitClient = broker;
     }
-  } catch { /* Will use direct API calls */ }
+  } catch { /* Will try without Bybit */ }
 
-  // If no Bybit client, create one for public data (no auth needed)
   if (!bybitClient) {
     bybitClient = new BybitClient({
       broker: 'BYBIT',
@@ -144,7 +220,7 @@ export async function feedMarketData(): Promise<{
   }
 
   const cryptoAssets = ['BTC/USD', 'ETH/USD'];
-  const intervals: Record<string, string> = { 'M5': '5', 'M15': '15', 'H1': '60', 'H4': '240' };
+  const intervals: Record<string, string> = { 'M5': '5m', 'M15': '15m', 'H1': '1h', 'H4': '4h' };
 
   // ═══ 0. FEED MACRO DATA (Fear & Greed, BTC Dominance, Market Cap) ═══
   try {
@@ -153,7 +229,6 @@ export async function feedMarketData(): Promise<{
       macroCache = macro;
       lastMacroUpdate = Date.now();
 
-      // Persist to DB for dashboard
       await withRetry(
         () => db.appSettings.upsert({
           where: { key: 'macro_market_data' },
@@ -171,75 +246,57 @@ export async function feedMarketData(): Promise<{
     errors.push(`Macro data: ${err.message}`);
   }
 
-  // ═══ 1. FEED CANDLES FROM BYBIT (rate-limited, 3 concurrent) ═══
-  // Fetch kline data with concurrency control to prevent fetch failed
-  const klineTasks = cryptoAssets.flatMap(asset => {
-    const symbol = assetToSymbol(asset);
-    return Object.entries(intervals).map(([tf, bybitInterval]) => {
-      return async () => {
-        try {
-          const klines = await bybitClient!.getKlines(symbol, bybitInterval, 200);
-          return { asset, tf, klines };
-        } catch (err: any) {
-          return { asset, tf, klines: [], __klineError: `Candles ${asset} ${tf}: ${err.message}` };
+  // ═══ 1. FEED CANDLES FROM BINANCE (PRIMARY — proven reliable) ═══
+  // Binance klines work from the user's network, Bybit doesn't always work
+  let binanceCandleErrors = 0;
+  for (const asset of cryptoAssets) {
+    const binanceSymbol = BINANCE_SYMBOLS[asset];
+    if (!binanceSymbol) continue;
+
+    for (const [tf, binanceInterval] of Object.entries(intervals)) {
+      try {
+        const klines = await fetchBinanceKlines(binanceSymbol, binanceInterval, 200);
+        if (klines.length === 0) {
+          binanceCandleErrors++;
+          continue;
         }
-      };
-    });
-  });
 
-  // Run kline tasks with concurrency limit
-  const klineResults = await runWithConcurrencyLimit(klineTasks, MAX_CONCURRENT_BYBIT);
-
-  // Collect errors and successful results
-  const successfulKlines: Array<{ asset: string; tf: string; klines: any[] }> = [];
-  for (const result of klineResults) {
-    if ('__error' in result) {
-      errors.push(result.__error);
-    } else if ('__klineError' in (result as any)) {
-      errors.push((result as any).__klineError);
-    } else {
-      successfulKlines.push(result as { asset: string; tf: string; klines: any[] });
-    }
-  }
-
-  // Upsert candles to DB in BATCHED chunks (10 at a time) to avoid Turso overload
-  const BATCH_SIZE = 10;
-  for (const { asset, tf, klines } of successfulKlines) {
-    if (klines.length === 0) continue;
-
-    // Process in batches
-    for (let i = 0; i < klines.length; i += BATCH_SIZE) {
-      const batch = klines.slice(i, i + BATCH_SIZE);
-      const upsertPromises = batch.map(async (k: any) => {
-        const timestamp = new Date(k.timestamp);
-        try {
-          await db.marketCandle.upsert({
-            where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
-            create: {
-              asset, timeframe: tf, timestamp,
-              open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-            },
-            update: {
-              open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-            },
+        // Batch upsert candles to DB
+        const BATCH_SIZE = 10;
+        for (let i = 0; i < klines.length; i += BATCH_SIZE) {
+          const batch = klines.slice(i, i + BATCH_SIZE);
+          const upsertPromises = batch.map(async (k) => {
+            const timestamp = new Date(k.timestamp);
+            try {
+              await db.marketCandle.upsert({
+                where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
+                create: {
+                  asset, timeframe: tf, timestamp,
+                  open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+                },
+                update: {
+                  open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+                },
+              });
+              return true;
+            } catch {
+              return false;
+            }
           });
-          return true;
-        } catch {
-          return false;
+          const batchResults = await Promise.allSettled(upsertPromises);
+          candlesUpdated += batchResults.filter(r => r.status === 'fulfilled' && r.value).length;
         }
-      });
-
-      const batchResults = await Promise.allSettled(upsertPromises);
-      const upserted = batchResults.filter(r => r.status === 'fulfilled' && r.value).length;
-      candlesUpdated += upserted;
+      } catch (err: any) {
+        errors.push(`Candles ${asset} ${tf}: ${err.message}`);
+      }
     }
   }
 
-  // Small delay between kline and sentiment phases to let network recover
-  await delay(INTER_GROUP_DELAY_MS);
+  if (binanceCandleErrors > 0) {
+    console.log(`[FEEDER] ⚠️ ${binanceCandleErrors} candle fetches returned empty from Binance`);
+  }
 
-  // ═══ 2. FEED MARKET SENTIMENT (sequential per asset, rate-limited internally) ═══
-  // Process one asset at a time to avoid overwhelming Bybit
+  // ═══ 2. FEED MARKET SENTIMENT (Binance for price, Bybit for OI/funding/orderbook) ═══
   for (const asset of cryptoAssets) {
     try {
       const sentiment = await computeSentiment(bybitClient!, asset);
@@ -247,7 +304,6 @@ export async function feedMarketData(): Promise<{
         sentimentCache.set(asset, sentiment);
         sentimentsUpdated++;
 
-        // Persist to DB as AppSettings for dashboard / signal generation
         await withRetry(
           () => db.appSettings.upsert({
             where: { key: `sentiment_${asset.replace('/', '_')}` },
@@ -265,11 +321,11 @@ export async function feedMarketData(): Promise<{
       errors.push(`Sentiment ${asset}: ${err.message}`);
     }
 
-    // Small delay between assets to avoid rate limiting
-    await delay(INTER_GROUP_DELAY_MS);
+    // 1 second delay between assets for Bybit rate limiting
+    await delay(1000);
   }
 
-  // ═══ 3. CACHE INSTRUMENT SPECS (sequential with delay) ═══
+  // ═══ 3. CACHE INSTRUMENT SPECS (Bybit — sequential with delay) ═══
   for (const asset of cryptoAssets) {
     try {
       const symbol = assetToSymbol(asset);
@@ -282,27 +338,27 @@ export async function feedMarketData(): Promise<{
           qtyStep: inst.qtyStep,
         });
       }
-    } catch (err: any) {
-      errors.push(`Instruments ${asset}: ${err.message}`);
-    }
-    // Small delay to avoid rate limiting
-    await delay(300);
+    } catch { /* non-critical */ }
+    await delay(500);
   }
 
   lastCacheUpdate = Date.now();
+
+  // Log summary
+  const bybitUsed = sentimentsUpdated > 0 || instrumentsCache.size > 0;
+  console.log(`[FEEDER] v4: ${candlesUpdated} candles (Binance), ${sentimentsUpdated} sentiments (${bybitUsed ? 'Bybit+Bin' : 'Binance-only'}), ${errors.length} errors`);
+
   return { candlesUpdated, sentimentsUpdated, errors };
 }
 
-// === FETCH MACRO DATA (Fear & Greed, BTC Dominance, Market Cap) ===
+// === FETCH MACRO DATA ===
 
 async function fetchMacroData(): Promise<MacroData | null> {
-  // Use cached macro data if still fresh
   if (macroCache && Date.now() - lastMacroUpdate < MACRO_CACHE_TTL_MS) {
     return macroCache;
   }
 
   try {
-    // Fetch Fear & Greed Index + Global Market Data from CoinGecko alternative APIs
     const [fgiResult, globalResult] = await Promise.allSettled([
       fetch('https://api.alternative.me/fng/?limit=1', {
         signal: AbortSignal.timeout(8000),
@@ -313,13 +369,12 @@ async function fetchMacroData(): Promise<MacroData | null> {
       }),
     ]);
 
-    let fearGreedIndex = 50; // Default: Neutral
+    let fearGreedIndex = 50;
     let fearGreedLabel = 'Neutral';
     let btcDominance = 0;
     let totalMarketCap = 0;
     let totalVolume24h = 0;
 
-    // Parse Fear & Greed
     if (fgiResult.status === 'fulfilled' && fgiResult.value.ok) {
       try {
         const fgiData = await fgiResult.value.json();
@@ -327,10 +382,9 @@ async function fetchMacroData(): Promise<MacroData | null> {
           fearGreedIndex = parseInt(fgiData.data[0].value) || 50;
           fearGreedLabel = fgiData.data[0].value_classification || 'Neutral';
         }
-      } catch { /* parse error, use defaults */ }
+      } catch { /* use defaults */ }
     }
 
-    // Parse Global Market Data
     if (globalResult.status === 'fulfilled' && globalResult.value.ok) {
       try {
         const globalData = await globalResult.value.json();
@@ -339,100 +393,120 @@ async function fetchMacroData(): Promise<MacroData | null> {
           totalMarketCap = globalData.data.total_market_cap?.usd || 0;
           totalVolume24h = globalData.data.total_volume?.usd || 0;
         }
-      } catch { /* parse error, use defaults */ }
+      } catch { /* use defaults */ }
     }
 
-    return {
-      fearGreedIndex,
-      fearGreedLabel,
-      btcDominance,
-      totalMarketCap,
-      totalVolume24h,
-      timestamp: new Date(),
-    };
+    return { fearGreedIndex, fearGreedLabel, btcDominance, totalMarketCap, totalVolume24h, timestamp: new Date() };
   } catch {
-    return macroCache; // Return stale cache on error
+    return macroCache;
   }
 }
 
-// === COMPUTE SENTIMENT FOR ASSET (with macro data) ===
-// v3: Uses sequential Bybit calls instead of Promise.allSettled to avoid fetch failed
+// === COMPUTE SENTIMENT (Binance primary, Bybit for extras) ===
+// v4: Uses Binance for price/ticker (always works), Bybit only for OI/funding/orderbook (optional)
 
-async function computeSentiment(client: BybitClient, asset: string): Promise<MarketSentiment | null> {
-  const symbol = assetToSymbol(asset);
+async function computeSentiment(bybitClient: BybitClient, asset: string): Promise<MarketSentiment | null> {
+  const binanceSymbol = BINANCE_SYMBOLS[asset];
+  const bybitSymbol = assetToSymbol(asset);
 
-  // Fetch data SEQUENTIALLY (not in parallel) to avoid overwhelming Bybit
-  // This prevents the "fetch failed" errors we saw when 5+ requests fire at once
-  let ticker: any = null;
+  // ═══ STEP 1: Get price data from Binance (RELIABLE) ═══
+  let lastPrice = 0;
+  let bid = 0;
+  let ask = 0;
+  let spread = 0;
+  let volume24h = 0;
+  let priceChange24h = 0;
+  let priceChange1h = 0;
+  let dataSource: 'BYBIT' | 'BINANCE' | 'MIXED' = 'BINANCE';
+
+  // Try Binance 24h ticker first (gives price + volume + 24h change)
+  const ticker24h = await fetchBinance24hTicker(binanceSymbol);
+  if (ticker24h) {
+    lastPrice = ticker24h.lastPrice;
+    bid = ticker24h.bidPrice;
+    ask = ticker24h.askPrice;
+    spread = ask - bid;
+    volume24h = ticker24h.volume;
+    priceChange24h = ticker24h.priceChangePercent;
+  } else {
+    // Fallback to simple price
+    const price = await fetchBinancePrice(binanceSymbol);
+    if (price) {
+      lastPrice = price;
+    } else {
+      return null; // No price from ANY source = no sentiment
+    }
+  }
+
+  // Get 1h price change from Binance klines
+  try {
+    const klines = await fetchBinanceKlines(binanceSymbol, '1h', 3);
+    if (klines.length >= 2) {
+      const prevClose = klines[klines.length - 2].close;
+      const currentClose = klines[klines.length - 1].close;
+      if (prevClose > 0) priceChange1h = ((currentClose - prevClose) / prevClose) * 100;
+    }
+  } catch { /* non-critical */ }
+
+  // ═══ STEP 2: Get Bybit-specific data (OI, funding, orderbook) — OPTIONAL ═══
+  // These are Bybit-specific features that Binance doesn't provide easily.
+  // If Bybit fails, we gracefully degrade — the sentiment still works with just price data.
   let oiData: any[] = [];
   let fundingData: any[] = [];
   let ob: any = null;
-  let klines: any[] = [];
+  let bybitAvailable = false;
 
-  // 1. Ticker (most important — if this fails, return null)
+  // Try Bybit ticker (for funding rate which Binance doesn't provide in 24hr ticker)
+  let bybitFundingRate = 0;
   try {
-    ticker = await client.getTicker(symbol);
-  } catch {
-    // Try one more time with a delay
-    await delay(1000);
-    try {
-      ticker = await client.getTicker(symbol);
-    } catch {
-      return null; // No price = no sentiment
+    const bybitTicker = await bybitClient.getTicker(bybitSymbol);
+    if (bybitTicker) {
+      bybitFundingRate = bybitTicker.fundingRate || 0;
+      bybitAvailable = true;
+      dataSource = 'MIXED';
     }
+  } catch { /* Bybit unavailable — use Binance-only data */ }
+
+  // Only make more Bybit calls if the first one worked
+  if (bybitAvailable) {
+    await delay(1000);
+
+    // Open Interest
+    try {
+      oiData = await bybitClient.getOpenInterest(bybitSymbol, '1h', 30);
+    } catch { /* non-critical */ }
+
+    await delay(1000);
+
+    // Funding History
+    try {
+      fundingData = await bybitClient.getFundingHistory(bybitSymbol, 10);
+    } catch { /* non-critical */ }
+
+    await delay(1000);
+
+    // Order Book
+    try {
+      ob = await bybitClient.getOrderBook(bybitSymbol, 25);
+    } catch { /* non-critical */ }
   }
-  if (!ticker) return null;
 
-  // 2. Open Interest (with delay after ticker)
-  await delay(300);
-  try {
-    oiData = await client.getOpenInterest(symbol, '1h', 30);
-  } catch { /* non-critical, use defaults */ }
-
-  // 3. Funding History (with delay)
-  await delay(300);
-  try {
-    fundingData = await client.getFundingHistory(symbol, 10);
-  } catch { /* non-critical */ }
-
-  // 4. Order Book (with delay)
-  await delay(300);
-  try {
-    ob = await client.getOrderBook(symbol, 25);
-  } catch { /* non-critical */ }
-
-  // 5. Klines for price change (with delay)
-  await delay(300);
-  try {
-    klines = await client.getKlines(symbol, '60', 2);
-  } catch { /* non-critical */ }
-
-  // Extract OI
+  // ═══ EXTRACT DERIVED DATA ═══
   const currentOI = oiData.length > 0 ? oiData[0].openInterest : 0;
   const oi1hAgo = oiData.length > 1 ? oiData[1].openInterest : currentOI;
   const oi24hAgo = oiData.length > 24 ? oiData[24].openInterest : (oiData.length > 0 ? oiData[oiData.length - 1].openInterest : currentOI);
   const oiChange1h = currentOI > 0 && oi1hAgo > 0 ? ((currentOI - oi1hAgo) / oi1hAgo) * 100 : 0;
   const oiChange24h = currentOI > 0 && oi24hAgo > 0 ? ((currentOI - oi24hAgo) / oi24hAgo) * 100 : 0;
 
-  // Extract funding
-  const currentFunding = fundingData.length > 0 ? fundingData[0].fundingRate : (ticker.fundingRate || 0);
+  const currentFunding = fundingData.length > 0 ? fundingData[0].fundingRate : bybitFundingRate;
   const fundingAvg = fundingData.length > 0
     ? fundingData.slice(0, 3).reduce((s: number, f: any) => s + f.fundingRate, 0) / Math.min(fundingData.length, 3)
     : currentFunding;
 
-  // Extract orderbook
   const bidDepth = ob ? ob.bids.reduce((s: number, b: any) => s + b.size, 0) : 0;
   const askDepth = ob ? ob.asks.reduce((s: number, a: any) => s + a.size, 0) : 0;
   const totalDepth = bidDepth + askDepth;
   const depthImbalance = totalDepth > 0 ? (bidDepth - askDepth) / totalDepth : 0;
-
-  // Extract 1h price change from klines
-  let priceChange1h = 0;
-  if (klines.length >= 2) {
-    const prevClose = klines[klines.length - 2].close;
-    const currentClose = klines[klines.length - 1].close;
-    if (prevClose > 0) priceChange1h = ((currentClose - prevClose) / prevClose) * 100;
-  }
 
   // Get macro data
   const macro = macroCache;
@@ -440,42 +514,35 @@ async function computeSentiment(client: BybitClient, asset: string): Promise<Mar
   // ═══ COMPOSITE PRESSURE SCORE (-100 to +100) ═══
   let pressureScore = 0;
 
-  // 1. Funding rate direction (±15 points)
   if (currentFunding > 0.0005) pressureScore += 15;
   else if (currentFunding > 0.0001) pressureScore += 8;
   else if (currentFunding < -0.0005) pressureScore -= 15;
   else if (currentFunding < -0.0001) pressureScore -= 8;
 
-  // 2. OI trend (±15 points)
   if (oiChange1h > 5) pressureScore += 15;
   else if (oiChange1h > 2) pressureScore += 8;
   else if (oiChange1h < -5) pressureScore -= 15;
   else if (oiChange1h < -2) pressureScore -= 8;
 
-  // 3. Order book depth imbalance (±20 points)
   if (depthImbalance > 0.3) pressureScore += 20;
   else if (depthImbalance > 0.15) pressureScore += 10;
   else if (depthImbalance < -0.3) pressureScore -= 20;
   else if (depthImbalance < -0.15) pressureScore -= 10;
 
-  // 4. Price momentum (±15 points)
   if (priceChange1h > 1) pressureScore += 15;
   else if (priceChange1h > 0.3) pressureScore += 8;
   else if (priceChange1h < -1) pressureScore -= 15;
   else if (priceChange1h < -0.3) pressureScore -= 8;
 
-  // 5. Fear & Greed contrarian signal (±15 points)
   if (macro) {
     if (macro.fearGreedIndex <= 20) pressureScore += 15;
     else if (macro.fearGreedIndex <= 35) pressureScore += 8;
     else if (macro.fearGreedIndex >= 80) pressureScore -= 15;
     else if (macro.fearGreedIndex >= 65) pressureScore -= 8;
 
-    // 6. BTC Dominance effect on ETH (±10 points)
     if (asset === 'ETH/USD' && macro.btcDominance > 55) pressureScore -= 10;
     if (asset === 'ETH/USD' && macro.btcDominance < 40) pressureScore += 10;
 
-    // 7. Volume surge (±10 points)
     if (macro.totalVolume24h > 0 && macro.totalMarketCap > 0) {
       const volumeRatio = macro.totalVolume24h / macro.totalMarketCap;
       if (volumeRatio > 0.1) pressureScore += 5;
@@ -483,12 +550,9 @@ async function computeSentiment(client: BybitClient, asset: string): Promise<Mar
     }
   }
 
-  // Clamp to -100..+100
   pressureScore = Math.max(-100, Math.min(100, pressureScore));
 
   // ═══ DERIVED SIGNALS ═══
-
-  // Sentiment: combines all factors
   let sentimentScore = 0;
   if (currentFunding > 0.0001) sentimentScore += 1;
   else if (currentFunding < -0.0001) sentimentScore -= 1;
@@ -506,8 +570,7 @@ async function computeSentiment(client: BybitClient, asset: string): Promise<Mar
   const sentiment: MarketSentiment['sentiment'] =
     sentimentScore >= 2 ? 'BULLISH' : sentimentScore <= -2 ? 'BEARISH' : 'NEUTRAL';
 
-  // Liquidity quality: based on spread and depth
-  const spreadPct = ticker.ask > 0 ? (ticker.spread / ticker.ask) * 100 : 100;
+  const spreadPct = ask > 0 ? (spread / ask) * 100 : 100;
   const liquidityQuality: MarketSentiment['liquidityQuality'] =
     spreadPct < 0.02 && totalDepth > 10 ? 'HIGH' :
     spreadPct < 0.05 && totalDepth > 5 ? 'MEDIUM' : 'LOW';
@@ -515,14 +578,14 @@ async function computeSentiment(client: BybitClient, asset: string): Promise<Mar
   return {
     asset,
     timestamp: new Date(),
-    lastPrice: ticker.lastPrice,
-    bid: ticker.bid,
-    ask: ticker.ask,
-    spread: ticker.spread,
+    lastPrice,
+    bid,
+    ask,
+    spread,
     spreadPct,
-    volume24h: ticker.volume24h,
+    volume24h,
     priceChange1h,
-    priceChange24h: ticker.lastPrice > 0 ? 0 : 0,
+    priceChange24h,
     fundingRate: currentFunding,
     fundingRateAvg: fundingAvg,
     openInterest: currentOI,
@@ -539,58 +602,42 @@ async function computeSentiment(client: BybitClient, asset: string): Promise<Mar
     sentiment,
     liquidityQuality,
     pressureScore,
+    dataSource,
   };
 }
 
 // === FAST: REFRESH ONLY PRICES (for mid-cycle monitoring) ===
-// Called every 60s by the SL/TP monitor to get fresh prices without full feed
+// v4: Uses Binance (reliable) instead of Bybit
 
 export async function refreshPrices(): Promise<Map<string, number>> {
   const prices = new Map<string, number>();
 
-  // Try to use cached sentiment first (fast, no API call)
+  // Try cached sentiment first (fast, no API call)
   for (const [asset, s] of sentimentCache) {
     if (Date.now() - new Date(s.timestamp).getTime() < CACHE_TTL_MS) {
       prices.set(asset, s.lastPrice);
     }
   }
 
-  // If we have fresh prices from cache, return them
   if (prices.size >= 2) return prices;
 
-  // Otherwise, fetch fresh prices from Bybit (fast - single endpoint per asset)
-  let bybitClient: BybitClient | null = null;
-  try {
-    const broker = await getBrokerClientFromDB();
-    if (broker instanceof BybitClient) bybitClient = broker;
-  } catch { /* ignore */ }
-
-  if (!bybitClient) {
-    bybitClient = new BybitClient({
-      broker: 'BYBIT',
-      apiKey: 'public',
-      apiSecret: 'public',
-      testnet: false,
-    });
-  }
-
+  // Fetch fresh prices from Binance (proven reliable from user's network)
   for (const asset of ['BTC/USD', 'ETH/USD']) {
+    const binanceSymbol = BINANCE_SYMBOLS[asset];
+    if (!binanceSymbol) continue;
+
     try {
-      const symbol = assetToSymbol(asset);
-      const price = await bybitClient.getLastPrice(symbol);
+      const price = await fetchBinancePrice(binanceSymbol);
       if (price) {
         prices.set(asset, price);
 
-        // Update sentiment cache price too (for SL/TP checking)
         const existing = sentimentCache.get(asset);
         if (existing) {
           existing.lastPrice = price;
           existing.timestamp = new Date();
         }
       }
-    } catch { /* ignore — will use stale prices */ }
-    // Small delay between assets
-    await delay(300);
+    } catch { /* use stale prices */ }
   }
 
   return prices;
@@ -623,11 +670,9 @@ export function getInstrumentSpecs(asset: string): { tickSize: number; minOrderQ
 // === GET SENTIMENT FROM DB (for signal generation on Vercel) ===
 
 export async function getSentimentFromDB(asset: string): Promise<MarketSentiment | null> {
-  // First check memory cache
   const cached = sentimentCache.get(asset);
   if (cached && Date.now() - lastCacheUpdate < CACHE_TTL_MS) return cached;
 
-  // Then check DB
   try {
     const setting = await db.appSettings.findUnique({
       where: { key: `sentiment_${asset.replace('/', '_')}` },
@@ -642,17 +687,14 @@ export async function getSentimentFromDB(asset: string): Promise<MarketSentiment
   return null;
 }
 
-// === SENTIMENT-BASED CONFIDENCE ADJUSTMENT (v2 — more granular) ===
-// Called by auto-trader to adjust signal confidence based on market sentiment
-// Returns ±0-15 confidence adjustment
+// === SENTIMENT-BASED CONFIDENCE ADJUSTMENT ===
 
 export function getSentimentConfidenceAdjustment(asset: string, direction: 'HIGHER' | 'LOWER'): number {
   const sentiment = sentimentCache.get(asset);
-  if (!sentiment) return 0; // No data, no adjustment
+  if (!sentiment) return 0;
 
   let adjustment = 0;
 
-  // ═══ 1. PRESSURE SCORE ALIGNMENT (strongest signal, ±8) ═══
   if (direction === 'HIGHER' && sentiment.pressureScore > 20) adjustment += 8;
   else if (direction === 'HIGHER' && sentiment.pressureScore > 5) adjustment += 4;
   else if (direction === 'HIGHER' && sentiment.pressureScore < -20) adjustment -= 8;
@@ -663,33 +705,28 @@ export function getSentimentConfidenceAdjustment(asset: string, direction: 'HIGH
   else if (direction === 'LOWER' && sentiment.pressureScore > 20) adjustment -= 8;
   else if (direction === 'LOWER' && sentiment.pressureScore > 5) adjustment -= 4;
 
-  // ═══ 2. SENTIMENT LABEL ALIGNMENT (±5) ═══
   if (sentiment.sentiment === 'BULLISH' && direction === 'HIGHER') adjustment += 5;
   else if (sentiment.sentiment === 'BULLISH' && direction === 'LOWER') adjustment -= 5;
   else if (sentiment.sentiment === 'BEARISH' && direction === 'LOWER') adjustment += 5;
   else if (sentiment.sentiment === 'BEARISH' && direction === 'HIGHER') adjustment -= 5;
 
-  // ═══ 3. FEAR & GREED CONTRARIAN (±3) ═══
   if (direction === 'HIGHER' && sentiment.fearGreedIndex <= 25) adjustment += 3;
   if (direction === 'HIGHER' && sentiment.fearGreedIndex >= 75) adjustment -= 3;
   if (direction === 'LOWER' && sentiment.fearGreedIndex >= 75) adjustment += 3;
   if (direction === 'LOWER' && sentiment.fearGreedIndex <= 25) adjustment -= 3;
 
-  // ═══ 4. LIQUIDITY QUALITY (penalty only) ═══
   if (sentiment.liquidityQuality === 'LOW') adjustment -= 10;
   else if (sentiment.liquidityQuality === 'MEDIUM') adjustment -= 3;
 
-  // ═══ 5. FUNDING RATE EXTREME (contrarian for extreme values) ═══
   if (sentiment.fundingRate > 0.0005 && direction === 'HIGHER') adjustment -= 2;
   if (sentiment.fundingRate > 0.0005 && direction === 'LOWER') adjustment += 2;
   if (sentiment.fundingRate < -0.0005 && direction === 'LOWER') adjustment -= 2;
   if (sentiment.fundingRate < -0.0005 && direction === 'HIGHER') adjustment += 2;
 
-  // Clamp to ±15
   return Math.max(-15, Math.min(15, adjustment));
 }
 
-// === MARKET CONTEXT SUMMARY (for dashboard / logging) ===
+// === MARKET CONTEXT SUMMARY ===
 
 export function getMarketSummary(): string {
   const parts: string[] = [];
@@ -703,7 +740,7 @@ export function getMarketSummary(): string {
 
   for (const [asset, s] of sentimentCache) {
     const assetShort = asset.split('/')[0];
-    parts.push(`${assetShort}:${s.sentiment}(P:${s.pressureScore >= 0 ? '+' : ''}${s.pressureScore} FR:${(s.fundingRate * 100).toFixed(4)}% OI:${s.oiChange1h >= 0 ? '+' : ''}${s.oiChange1h.toFixed(1)}%)`);
+    parts.push(`${assetShort}:${s.sentiment}(P:${s.pressureScore >= 0 ? '+' : ''}${s.pressureScore} FR:${(s.fundingRate * 100).toFixed(4)}% OI:${s.oiChange1h >= 0 ? '+' : ''}${s.oiChange1h.toFixed(1)}% [${s.dataSource}])`);
   }
 
   return parts.join(' | ') || 'No market data available';
