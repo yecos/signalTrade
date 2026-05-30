@@ -165,55 +165,70 @@ export class BybitClient {
       headers['X-BAPI-RECV-WINDOW'] = auth.recvWindow;
     }
 
-    try {
-      let url: string;
-      let body: string | undefined;
+    // ═══ Retry logic with timeout ═══
+    const MAX_RETRIES = 3;
+    const TIMEOUT_MS = 15000; // 15 second timeout
+    const isTransientError = (err: any) => {
+      const msg = (err.message || '').toLowerCase();
+      return msg.includes('fetch failed') || msg.includes('econnreset') ||
+             msg.includes('etimedout') || msg.includes('abort') ||
+             msg.includes('network') || msg.includes('socket hang up') ||
+             msg.includes('enotfound') || msg.includes('connrefused');
+    };
 
-      if (method === 'GET') {
-        // GET: params go in the query string
-        url = queryString
-          ? `${this.baseUrl}${path}?${queryString}`
-          : `${this.baseUrl}${path}`;
-      } else {
-        // POST: params go in the body, sign uses JSON string
-        url = `${this.baseUrl}${path}`;
-        body = JSON.stringify(cleanParams);
-      }
-
-      const response = await fetch(url, {
-        method,
-        headers,
-        body,
-      });
-
-      const text = await response.text();
-      if (!text) {
-        return { success: false, retCode: -1, retMsg: 'Empty response from server' };
-      }
-
-      let data: any;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
-        data = JSON.parse(text);
-      } catch {
-        return { success: false, retCode: -1, retMsg: `Invalid JSON response: ${text.substring(0, 100)}` };
-      }
+        let url: string;
+        let body: string | undefined;
 
-      if (data.retCode !== 0) {
-        console.error(`[BYBIT] API Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
-        return { success: false, retCode: data.retCode, retMsg: data.retMsg };
-      }
+        if (method === 'GET') {
+          url = queryString
+            ? `${this.baseUrl}${path}?${queryString}`
+            : `${this.baseUrl}${path}`;
+        } else {
+          url = `${this.baseUrl}${path}`;
+          body = JSON.stringify(cleanParams);
+        }
 
-      return { success: true, ...data };
-    } catch (err: any) {
-      // Only log as warn (not error) for network issues — these are transient and expected
-      const msg = err?.message || String(err);
-      if (msg.includes('fetch failed') || msg.includes('ECONNRESET') || msg.includes('ETIMEDOUT') || msg.includes('AbortError')) {
-        // Network error — silent unless in debug mode (already logged too many of these)
-      } else {
-        console.error(`[BYBIT] Request failed: ${msg}`);
+        const response = await fetch(url, {
+          method,
+          headers,
+          body,
+          signal: AbortSignal.timeout(TIMEOUT_MS),
+        });
+
+        const text = await response.text();
+        if (!text) {
+          return { success: false, retCode: -1, retMsg: 'Empty response from server' };
+        }
+
+        let data: any;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          return { success: false, retCode: -1, retMsg: `Invalid JSON response: ${text.substring(0, 100)}` };
+        }
+
+        if (data.retCode !== 0) {
+          console.error(`[BYBIT] API Error: ${data.retCode} - ${data.retMsg}`, cleanParams);
+          return { success: false, retCode: data.retCode, retMsg: data.retMsg };
+        }
+
+        return { success: true, ...data };
+      } catch (err: any) {
+        const isTransient = isTransientError(err);
+        if (isTransient && attempt < MAX_RETRIES) {
+          const delay = 1000 * Math.pow(2, attempt - 1) + Math.random() * 500;
+          console.warn(`[BYBIT] Request failed (attempt ${attempt}/${MAX_RETRIES}): ${err.message} — retrying in ${Math.round(delay)}ms`);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        console.error(`[BYBIT] Request failed (final): ${err.message}`);
+        return { success: false, retCode: -1, retMsg: err.message };
       }
-      return { success: false, retCode: -1, retMsg: msg };
     }
+
+    return { success: false, retCode: -1, retMsg: 'Max retries exceeded' };
   }
 
   // === MARKET DATA ===
@@ -670,7 +685,7 @@ export class PaperTradingClient {
     // For paper trading, fetch real price from Binance public API (no auth needed)
     try {
       const url = `https://api.binance.com/api/v3/ticker/price?symbol=${symbol}`;
-      const data = await fetch(url).then(r => r.json());
+      const data = await fetch(url, { signal: AbortSignal.timeout(8000) }).then(r => r.json());
       return parseFloat(data.price);
     } catch {
       return null;
@@ -680,7 +695,7 @@ export class PaperTradingClient {
   async getTicker(symbol: string): Promise<TickerInfo | null> {
     try {
       const url = `https://api.binance.com/api/v3/ticker/bookTicker?symbol=${symbol}`;
-      const data = await fetch(url).then(r => r.json());
+      const data = await fetch(url, { signal: AbortSignal.timeout(8000) }).then(r => r.json());
       const bid = parseFloat(data.bidPrice);
       const ask = parseFloat(data.askPrice);
       return {

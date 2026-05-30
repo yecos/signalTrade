@@ -276,34 +276,18 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     config.maxConcurrentSignals = 50;
   }
 
-  // ═══ Force maxOpenPositions to 10 in data collection mode ═══
+  // ═══ Force maxOpenPositions to 8 in data collection mode ═══
   // The DB default is 3, which is too low for building statistics
+  // Reduced from 20 → 8: too many positions = bloated DB + correlated exposure
   try {
     const account = await getOrCreateAccount();
-    const targetMax = 10; // 10 concurrent positions max for data collection
-    if (account.maxOpenPositions !== targetMax) {
-      await withRetry(
-        () => db.account.update({
-          where: { id: account.id },
-          data: { maxOpenPositions: targetMax },
-        }),
-        2, 1000, 'maxPositions-update'
-      );
-      log('INFO', `⚙️ maxOpenPositions actualizado: ${account.maxOpenPositions} → ${targetMax} (modo recolección)`);
+    if (account.maxOpenPositions !== 8) {
+      await db.account.update({
+        where: { id: account.id },
+        data: { maxOpenPositions: 8 },
+      });
+      log('INFO', `⚙️ maxOpenPositions actualizado: ${account.maxOpenPositions} → 8 (modo recolección)`);
     }
-    // Also update the riskConfig in appSettings to match
-    try {
-      const riskConfigSetting = await db.appSettings.findUnique({ where: { key: 'riskConfig' } });
-      const currentRiskConfig = riskConfigSetting ? JSON.parse(riskConfigSetting.value) : {};
-      if (currentRiskConfig.maxOpenPositions !== targetMax) {
-        const updatedConfig = { ...currentRiskConfig, maxOpenPositions: targetMax };
-        await db.appSettings.upsert({
-          where: { key: 'riskConfig' },
-          create: { key: 'riskConfig', value: JSON.stringify(updatedConfig), description: 'Risk management configuration' },
-          update: { value: JSON.stringify(updatedConfig) },
-        });
-      }
-    } catch { /* non-critical */ }
   } catch (err: any) {
     log('WARN', `Could not update maxOpenPositions: ${err.message}`);
   }
@@ -494,12 +478,9 @@ async function runCycle(): Promise<void> {
   // ═══ CLEANUP: Close positions with unrealistic SL/TP (>1.5% from entry) ═══
   // These were created before the SL/TP cap fix and will never close properly
   try {
-    const openPositions = await withRetry(
-      () => db.position.findMany({ where: { status: 'OPEN' } }),
-      3, 1000, 'cycle-cleanup-find'
-    );
+    const badPositions = await db.position.findMany({ where: { status: 'OPEN' } });
     const toClose: string[] = [];
-    for (const pos of openPositions) {
+    for (const pos of badPositions) {
       const entry = pos.entryPrice;
       if (!entry || entry === 0) continue;
       const isCrypto = pos.asset.includes('BTC') || pos.asset.includes('ETH');
@@ -511,14 +492,56 @@ async function runCycle(): Promise<void> {
       }
     }
     if (toClose.length > 0) {
-      // Mass-close bad positions with updateMany (fast + reliable)
-      await withRetry(
-        () => db.position.updateMany({
-          where: { id: { in: toClose } },
-          data: { status: 'CLOSED', closedAt: new Date(), unrealizedPnl: 0, unrealizedPnlPct: 0 },
-        }),
-        3, 1500, 'cycle-cleanup-positions'
-      );
+      // Close positions and their trades
+      for (const posId of toClose) {
+        const pos = await db.position.findUnique({ where: { id: posId } });
+        if (!pos) continue;
+        // Get real price for P&L
+        let closePrice = pos.entryPrice; // fallback
+        try {
+          const broker = await getBrokerClientFromDB();
+          const symbol = pos.asset.replace('/', '').replace('USD', 'USDT');
+          const lastPrice = await broker.getLastPrice(symbol);
+          if (lastPrice) closePrice = lastPrice;
+        } catch { /* use entry price */ }
+
+        await db.position.update({
+          where: { id: posId },
+          data: { status: 'CLOSED', currentPrice: closePrice, unrealizedPnl: 0, closedAt: new Date() },
+        });
+        // Close linked trade
+        if (pos.tradeId) {
+          const pnl = pos.direction === 'BUY'
+            ? (closePrice - pos.entryPrice) * pos.quantity
+            : (pos.entryPrice - closePrice) * pos.quantity;
+          await db.trade.update({
+            where: { id: pos.tradeId },
+            data: {
+              status: 'CLOSED',
+              exitPrice: closePrice,
+              realizedPnl: pnl,
+              realizedPnlPct: pos.entryPrice > 0 ? (pnl / (pos.entryPrice * pos.quantity)) * 100 : 0,
+              closedAt: new Date(),
+            },
+          });
+        }
+        // Close linked signal
+        const trade = pos.tradeId ? await db.trade.findUnique({ where: { id: pos.tradeId } }) : null;
+        if (trade?.signalId) {
+          const pnl = pos.direction === 'BUY'
+            ? (closePrice - pos.entryPrice) * pos.quantity
+            : (pos.entryPrice - closePrice) * pos.quantity;
+          await db.signal.update({
+            where: { id: trade.signalId },
+            data: {
+              status: 'CLOSED',
+              exitPrice: closePrice,
+              result: pnl > 0 ? 'WIN' : pnl < 0 ? 'LOSS' : 'DRAW',
+              verificationMethod: 'BAD_SLTP_CLEANUP',
+            },
+          });
+        }
+      }
       log('INFO', `🧹 Closed ${toClose.length} positions with unrealistic SL/TP (>1.5% SL / >3% TP from entry)`);
     }
   } catch (cleanupErr: any) {
@@ -799,21 +822,59 @@ function startStatusServer(): Promise<void> {
         try {
           log('INFO', '🧹 Force-close ALL solicitado vía /force-close-all');
           const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
-          const engine = getExecutionEngine();
           let closed = 0;
+          
           for (const pos of openPositions) {
             try {
+              // Try engine close first (updates trades, signals, account properly)
+              const engine = getExecutionEngine();
               await engine.closePosition(pos.id, `FORCE CLOSE via /force-close-all`);
               closed++;
             } catch {
-              // Force-close in DB directly
-              await db.position.update({
-                where: { id: pos.id },
-                data: { status: 'CLOSED', closedAt: new Date() },
-              });
-              closed++;
+              // Engine close failed — force-close directly in DB
+              try {
+                // Close linked trade first
+                if (pos.tradeId) {
+                  await db.trade.update({
+                    where: { id: pos.tradeId },
+                    data: { status: 'CLOSED', exitPrice: pos.currentPrice || pos.entryPrice, closedAt: new Date() },
+                  });
+                }
+                // Close linked signal
+                const trade = pos.tradeId ? await db.trade.findUnique({ where: { id: pos.tradeId } }) : null;
+                if (trade?.signalId) {
+                  await db.signal.update({
+                    where: { id: trade.signalId },
+                    data: { status: 'CLOSED', verificationMethod: 'FORCE_CLOSE_ALL' },
+                  });
+                }
+                // Close position
+                await db.position.update({
+                  where: { id: pos.id },
+                  data: { status: 'CLOSED', closedAt: new Date() },
+                });
+                closed++;
+              } catch (dbErr: any) {
+                log('WARN', `  Could not force-close position ${pos.id}: ${dbErr.message}`);
+              }
             }
           }
+          
+          // Verify cleanup
+          const remainingOpen = await db.position.count({ where: { status: 'OPEN' } });
+          if (remainingOpen > 0) {
+            log('WARN', `  ⚠️ ${remainingOpen} positions still OPEN after cleanup — retrying...`);
+            // Nuclear option: bulk update
+            await db.position.updateMany({
+              where: { status: 'OPEN' },
+              data: { status: 'CLOSED', closedAt: new Date() },
+            });
+            await db.trade.updateMany({
+              where: { status: 'OPEN' },
+              data: { status: 'CLOSED', closedAt: new Date() },
+            });
+          }
+          
           log('INFO', `🧹 Force-closed ${closed} positions`);
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: true, closed, message: `Closed ${closed} positions` }));
@@ -994,87 +1055,65 @@ async function main(): Promise<void> {
   // When starting with --auto, any existing OPEN positions are from a previous
   // worker session that was interrupted. They can't be properly monitored anymore
   // (their SL/TP/expiry context is stale). Close them all for a clean start.
-  // Uses updateMany for atomic mass-closure (avoids per-position fetch failed errors)
   try {
-    const openCount = await withRetry(
-      () => db.position.count({ where: { status: 'OPEN' } }),
-      3, 1000, 'cleanup-count'
-    );
+    const openPositions = await db.position.findMany({ where: { status: 'OPEN' } });
 
-    if (openCount > 0) {
-      log('INFO', `🧹 CLEANUP: Encontradas ${openCount} posiciones abiertas de sesiones anteriores...`);
+    if (openPositions.length > 0) {
+      log('INFO', `🧹 CLEANUP: Encontradas ${openPositions.length} posiciones abiertas de sesiones anteriores...`);
 
       if (AUTO_START) {
-        // ═══ MASS CLOSURE: updateMany for speed + reliability ═══
-        // Close ALL positions in ONE operation — much faster and more reliable
-        // than one-by-one engine.closePosition() which does 5+ DB ops per position
-        const closeResult = await withRetry(
-          () => db.position.updateMany({
-            where: { status: 'OPEN' },
-            data: { status: 'CLOSED', closedAt: new Date(), unrealizedPnl: 0, unrealizedPnlPct: 0 },
-          }),
-          3, 1500, 'cleanup-positions'
-        );
-
-        // Also close ALL open trades
-        const tradeResult = await withRetry(
-          () => db.trade.updateMany({
-            where: { status: { in: ['OPEN', 'FILLED'] } },
-            data: { status: 'CLOSED', closedAt: new Date() },
-          }),
-          3, 1500, 'cleanup-trades'
-        );
-
-        // Also close any orphaned PENDING signals from auto-trader
-        let signalResult = { count: 0 };
-        try {
-          signalResult = await db.signal.updateMany({
-            where: { status: 'PENDING', source: 'AUTO' },
-            data: { status: 'CLOSED', result: 'DRAW', verificationMethod: 'STARTUP_CLEANUP' },
-          });
-        } catch { /* non-critical */ }
-
-        log('INFO', `🧹 CLEANUP: ${closeResult.count} posiciones cerradas + ${tradeResult.count} trades + ${signalResult.count} señales limpiadas (sesión limpia)`);
-
-        // ═══ VERIFICATION: Confirm cleanup actually worked ═══
-        let verifyCount = openCount; // assume worst case
-        try {
-          verifyCount = await withRetry(
-            () => db.position.count({ where: { status: 'OPEN' } }),
-            3, 2000, 'cleanup-verify'
-          );
-        } catch { /* verification failed */ }
-
-        if (verifyCount > 0) {
-          log('WARN', `⚠️ CLEANUP VERIFICATION: Still ${verifyCount} OPEN positions! Retrying mass closure...`);
-          // Nuclear option: try again with longer retry
+        // With --auto: close ALL positions (fresh start)
+        const engine = getExecutionEngine();
+        let closed = 0;
+        for (const pos of openPositions) {
           try {
-            await withRetry(
-              () => db.position.updateMany({
-                where: { status: 'OPEN' },
-                data: { status: 'CLOSED', closedAt: new Date() },
-              }),
-              5, 3000, 'cleanup-retry'
-            );
-            log('INFO', `🧹 CLEANUP RETRY: Second mass closure completed`);
-          } catch (retryErr: any) {
-            log('ERROR', `❌ CLEANUP RETRY FAILED: ${retryErr.message}. Positions may still be open!`);
+            await engine.closePosition(pos.id, `STARTUP CLEANUP: fresh start (--auto mode)`);
+            closed++;
+          } catch {
+            // Force-close directly in DB if engine fails
+            await db.position.update({
+              where: { id: pos.id },
+              data: { status: 'CLOSED', closedAt: new Date() },
+            });
+            closed++;
           }
         }
+        // Also close any associated OPEN trades
+        const openTrades = await db.trade.findMany({ where: { status: 'OPEN' } });
+        for (const trade of openTrades) {
+          try {
+            await db.trade.update({
+              where: { id: trade.id },
+              data: { status: 'CLOSED' },
+            });
+          } catch { /* ignore */ }
+        }
+        log('INFO', `🧹 CLEANUP: ${closed} posiciones cerradas + ${openTrades.length} trades limpiados (sesión limpia)`);
       } else {
         // Without --auto: only close positions older than 40 min (safety)
-        const STALE_THRESHOLD = new Date(Date.now() - 40 * 60 * 1000);
-        const staleResult = await withRetry(
-          () => db.position.updateMany({
-            where: { status: 'OPEN', openedAt: { lt: STALE_THRESHOLD } },
-            data: { status: 'CLOSED', closedAt: new Date(), unrealizedPnl: 0, unrealizedPnlPct: 0 },
-          }),
-          3, 1500, 'cleanup-stale'
-        );
-        if (staleResult.count > 0) {
-          log('INFO', `🧹 CLEANUP: ${staleResult.count} posiciones huérfanas cerradas (>40 min)`);
+        const now = Date.now();
+        const STALE_THRESHOLD_MS = 40 * 60 * 1000;
+        let staleClosed = 0;
+        const engine = getExecutionEngine();
+        for (const pos of openPositions) {
+          const age = now - new Date(pos.openedAt).getTime();
+          if (age > STALE_THRESHOLD_MS) {
+            try {
+              await engine.closePosition(pos.id, `STARTUP CLEANUP: position open ${Math.round(age / 60000)} min`);
+              staleClosed++;
+            } catch {
+              await db.position.update({
+                where: { id: pos.id },
+                data: { status: 'CLOSED', closedAt: new Date() },
+              });
+              staleClosed++;
+            }
+          }
+        }
+        if (staleClosed > 0) {
+          log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones huérfanas cerradas (>40 min)`);
         } else {
-          log('INFO', `📊 ${openCount} posiciones abiertas activas (dentro del expiry)`);
+          log('INFO', `📊 ${openPositions.length} posiciones abiertas activas (dentro del expiry)`);
         }
       }
     }
