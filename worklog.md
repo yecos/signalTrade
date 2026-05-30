@@ -193,3 +193,26 @@ Stage Summary:
 - maxOpenPositions fixed to 10 (was 20 in data collection mode)
 - Execution engine has retry logic for critical position close operations
 - Bybit API network errors are silent instead of flooding the console
+
+---
+Task ID: 1-4
+Agent: Main
+Task: Fix position limit bug, API resilience, fee tracking, build backtest v3
+
+Work Log:
+- Analyzed full codebase (worker.ts, risk-manager.ts, execution-engine.ts, broker-client.ts, backtest.ts, auto-trader.ts, market-data-feeder.ts)
+- Fixed position limit: reduced from 20 to 8 in data collection mode (risk-manager.ts)
+- Fixed Bybit API: added 15s timeout + 3 retries with exponential backoff (broker-client.ts)
+- Fixed Paper trading: added 8s timeout to Binance fetch calls (broker-client.ts)
+- Fixed force-close-all: added verification + nuclear bulk update fallback (worker.ts)
+- Updated maxOpenPositions from 10 to 8 in worker.ts
+- Created backtest-v3.ts: realistic simulation with SL/TP, fees (0.12% round trip), slippage, equity curve, max drawdown, Sharpe ratio, profit factor
+- Backtest v3 auto-tests M5, M15, H1 timeframes for comparison
+- Downloads from Binance with Bybit fallback
+- All changes committed and pushed to GitHub (17dc1a1)
+
+Stage Summary:
+- Position limit: 20 → 8 (less correlated exposure, faster DB cleanup)
+- Bybit API: timeout + retry = no more hung connections
+- Backtest v3: Can now test with real historical data + realistic costs
+- Key insight: Win rate alone is meaningless without fee/slippage accounting
