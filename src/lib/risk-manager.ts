@@ -295,19 +295,78 @@ export async function assessRisk(params: {
 
   // ═══ CHECK 5: MAX OPEN POSITIONS ═══
   const openPositions = await db.position.count({ where: { status: 'OPEN' } });
-  // In data collection mode, allow up to 8 positions (enough for stats, not excessive exposure)
-  // Reduced from 20 — too many positions caused bloated DB and correlated exposure
+  // In data collection mode, allow slightly more positions for stats gathering.
+  // Since backtest v8.1 proved Mean Reversion ETHUSDT 1H as the winner, we
+  // keep the limit tight (5 normal, 8 in data collection mode) to focus on
+  // the proven edge rather than accumulating unproven pattern data.
   const effectiveMaxPositions = params.dataCollectionMode
     ? Math.max(config.maxOpenPositions, 8)
     : config.maxOpenPositions;
   if (openPositions >= effectiveMaxPositions) {
-    return {
-      allowed: false,
-      reason: `Máximo de posiciones abiertas alcanzado: ${openPositions}/${effectiveMaxPositions}${params.dataCollectionMode ? ' (modo recolección)' : ''}`,
-      positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
-      stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
-      riskRewardRatio: 0, warnings, circuitBreaker: false,
-    };
+    // ═══ AUTO-EVICT: Close the oldest open position to make room ═══
+    // This prevents the system from getting stuck when old positions
+    // accumulate and block all new trades (the "10/10 stuck" bug)
+    try {
+      const oldestPosition = await db.position.findFirst({
+        where: { status: 'OPEN' },
+        orderBy: { openedAt: 'asc' },
+      });
+      if (oldestPosition) {
+        const positionAge = Date.now() - (oldestPosition.openedAt?.getTime() || 0);
+        // Only evict if the position is older than 30 minutes (give new trades time)
+        if (positionAge > 30 * 60 * 1000) {
+          // Close the position with current market price
+          let closePrice = oldestPosition.currentPrice || oldestPosition.entryPrice;
+          try {
+            const { getBrokerClientFromDB, assetToSymbol } = await import('./broker-client');
+            const broker = await getBrokerClientFromDB();
+            const lastPrice = await broker.getLastPrice(assetToSymbol(oldestPosition.asset));
+            if (lastPrice) closePrice = lastPrice;
+          } catch { /* use existing price */ }
+
+          const pnl = oldestPosition.direction === 'BUY'
+            ? (closePrice - oldestPosition.entryPrice) * oldestPosition.quantity
+            : (oldestPosition.entryPrice - closePrice) * oldestPosition.quantity;
+
+          await db.position.update({
+            where: { id: oldestPosition.id },
+            data: { status: 'CLOSED', currentPrice: closePrice, unrealizedPnl: pnl, closedAt: new Date() },
+          });
+          if (oldestPosition.tradeId) {
+            await db.trade.update({
+              where: { id: oldestPosition.tradeId },
+              data: {
+                status: 'CLOSED', exitPrice: closePrice, realizedPnl: pnl,
+                realizedPnlPct: oldestPosition.entryPrice > 0 ? (pnl / (oldestPosition.entryPrice * oldestPosition.quantity)) * 100 : 0,
+                closedAt: new Date(),
+              },
+            });
+          }
+          // Don't block the new trade — let it through after eviction
+          warnings.push(`Posición más antigua (${oldestPosition.asset}, ${Math.round(positionAge / 60000)}min) cerrada para hacer espacio`);
+          console.log(`[RISK] Auto-evicted oldest position ${oldestPosition.id.substring(0,8)} ${oldestPosition.asset} (${Math.round(positionAge / 60000)}min old) to make room for new trade`);
+        } else {
+          // All positions are fresh (<30 min) — genuinely at capacity
+          return {
+            allowed: false,
+            reason: `Máximo de posiciones abiertas alcanzado: ${openPositions}/${effectiveMaxPositions}${params.dataCollectionMode ? ' (modo recolección)' : ''}`,
+            positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
+            stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
+            riskRewardRatio: 0, warnings, circuitBreaker: false,
+          };
+        }
+      }
+    } catch (evictErr: any) {
+      // If eviction fails, still block — safer than overexposing
+      console.error(`[RISK] Auto-evict failed: ${evictErr.message}`);
+      return {
+        allowed: false,
+        reason: `Máximo de posiciones abiertas alcanzado: ${openPositions}/${effectiveMaxPositions} (auto-evict falló: ${evictErr.message})`,
+        positionSize: 0, positionValueUsd: 0, riskAmountUsd: 0,
+        stopLossDistance: 0, stopLossPrice: 0, takeProfitPrice: 0,
+        riskRewardRatio: 0, warnings, circuitBreaker: false,
+      };
+    }
   }
 
   // ═══ CHECK 6: SAME ASSET EXPOSURE ═══

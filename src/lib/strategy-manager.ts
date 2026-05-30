@@ -145,17 +145,17 @@ export interface StrategyDashboard {
 // === DEFAULT CONFIG ===
 
 export const DEFAULT_STRATEGY_MANAGER_CONFIG: StrategyManagerConfig = {
-  enabled: false,
-  fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG },
-  gridTrading: { ...DEFAULT_GRID_CONFIG },
-  meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG },
-  orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG },
+  enabled: true, // CHANGED: Now enabled by default — we have a proven edge
+  fundingArb: { ...DEFAULT_FUNDING_ARB_CONFIG, enabled: false }, // No edge in backtest
+  gridTrading: { ...DEFAULT_GRID_CONFIG, enabled: false }, // Fragile in trending markets
+  meanReversion: { ...DEFAULT_MEAN_REVERSION_CONFIG, enabled: true }, // PROVEN: PF 2.32, WR 62.3%, Sharpe 6.04
+  orderFlow: { ...DEFAULT_ORDERFLOW_CONFIG, enabled: true }, // Context/confirmation layer
   maxTotalExposureUsd: 10000,
   maxDailyLossUsd: 500,
   circuitBreakerPct: 5,
   regimeAdaptive: true,
   sessionAware: true,
-  dryRun: true, // SAFE: Default to dry run
+  dryRun: true, // SAFE: Default to dry run (use CONSERVATIVE preset for real)
 };
 
 // === IN-MEMORY STATE ===

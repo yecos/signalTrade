@@ -276,20 +276,48 @@ async function runAutoTrader(): Promise<{ generated: number; skipped: number; er
     config.maxConcurrentSignals = 50;
   }
 
-  // ═══ Force maxOpenPositions to 8 in data collection mode ═══
-  // The DB default is 3, which is too low for building statistics
-  // Reduced from 20 → 8: too many positions = bloated DB + correlated exposure
+  // ═══ Sync position limit to BOTH account table AND riskConfig ═══
+  // BUG FIX: Previously only updated account.maxOpenPositions, but the risk
+  // manager reads from appSettings.riskConfig.maxOpenPositions — so the limit
+  // was never actually changed. Now we update BOTH.
+  //
+  // Since backtest v8.1 proved Mean Reversion ETHUSDT 1H as the winner,
+  // we reduce from 8 → 5 positions (don't need data collection on unproven
+  // patterns anymore — focus on the proven edge)
+  const EFFECTIVE_MAX_POSITIONS = 5;
   try {
+    // 1. Update account table (for display/status)
     const account = await getOrCreateAccount();
-    if (account.maxOpenPositions !== 8) {
+    if (account.maxOpenPositions !== EFFECTIVE_MAX_POSITIONS) {
       await db.account.update({
         where: { id: account.id },
-        data: { maxOpenPositions: 8 },
+        data: { maxOpenPositions: EFFECTIVE_MAX_POSITIONS },
       });
-      log('INFO', `⚙️ maxOpenPositions actualizado: ${account.maxOpenPositions} → 8 (modo recolección)`);
+      log('INFO', `⚙️ account.maxOpenPositions: ${account.maxOpenPositions} → ${EFFECTIVE_MAX_POSITIONS}`);
+    }
+    // 2. Update riskConfig in appSettings (the one actually used for enforcement)
+    const riskConfigSetting = await db.appSettings.findUnique({ where: { key: 'riskConfig' } });
+    if (riskConfigSetting) {
+      const riskConfig = JSON.parse(riskConfigSetting.value);
+      if (riskConfig.maxOpenPositions !== EFFECTIVE_MAX_POSITIONS) {
+        riskConfig.maxOpenPositions = EFFECTIVE_MAX_POSITIONS;
+        await db.appSettings.update({
+          where: { key: 'riskConfig' },
+          data: { value: JSON.stringify(riskConfig) },
+        });
+        log('INFO', `⚙️ riskConfig.maxOpenPositions: → ${EFFECTIVE_MAX_POSITIONS} (enforcement fixed)`);
+      }
+    } else {
+      // No riskConfig yet — create one with the correct limit
+      await db.appSettings.upsert({
+        where: { key: 'riskConfig' },
+        create: { key: 'riskConfig', value: JSON.stringify({ maxOpenPositions: EFFECTIVE_MAX_POSITIONS }), description: 'Risk management configuration' },
+        update: { value: JSON.stringify({ maxOpenPositions: EFFECTIVE_MAX_POSITIONS }) },
+      });
+      log('INFO', `⚙️ riskConfig created with maxOpenPositions: ${EFFECTIVE_MAX_POSITIONS}`);
     }
   } catch (err: any) {
-    log('WARN', `Could not update maxOpenPositions: ${err.message}`);
+    log('WARN', `Could not sync position limit: ${err.message}`);
   }
 
   const result = await runAutoTraderCycle(config);
@@ -1197,10 +1225,12 @@ async function main(): Promise<void> {
 
     log('INFO', '🚀 AUTO-START completo — Worker listo para operar');
     log('INFO', '');
-    log('INFO', '  📊 Proven Edges activos:');
-    log('INFO', '    TIER_1: liq_sweep+NY+BTC 66.7%, liq_sweep+Asia+BTC 62.2%, liq_sweep+Overlap+ETH 61.1%');
-    log('INFO', '    TIER_2: liq_sweep+NY+ETH 58.2%, liq_sweep+London+BTC 55.7%, fakeout+Asia+ETH 56.5%');
-    log('INFO', '  🚫 Patrones bloqueados: breakout, trend_continuation, none');
+    log('INFO', '  📊 PROVEN EDGE (Backtest v8.1):');
+    log('INFO', '    ⭐ Mean Reversion ETHUSDT 1H — PF 2.32, WR 62.3%, Sharpe 6.04, +$130.88');
+    log('INFO', '    ✅ Grid Trading ETHUSDT 15m — PF 3.17, WR 97.4% (ranging only)');
+    log('INFO', '    ❌ Funding Arb — Data issues, 0% WR (disabled)');
+    log('INFO', '    ❌ Pattern-based (v3-v7) — NO EDGE (25-34% WR, -91% to -100%)');
+    log('INFO', '  💡 Preset: /strategy-preset?preset=CONSERVATIVE para Mean Reversion con capital real');
     log('INFO', '');
   } else {
     // Check auto-trader state from DB
@@ -1255,30 +1285,42 @@ async function main(): Promise<void> {
         }
         log('INFO', `🧹 CLEANUP: ${closed} posiciones cerradas + ${openTrades.length} trades limpiados (sesión limpia)`);
       } else {
-        // Without --auto: only close positions older than 40 min (safety)
-        const now = Date.now();
-        const STALE_THRESHOLD_MS = 40 * 60 * 1000;
-        let staleClosed = 0;
+        // Without --auto: close ALL positions from previous sessions.
+        // FIX: Previously only closed positions >40 min old, but this caused
+        // the "10/10 stuck" bug — positions pile up because each restart only
+        // cleans old ones, new ones get created, and the limit is reached
+        // before any age out. Now we close ALL positions since they're from
+        // a previous worker session that was interrupted and can't be properly
+        // monitored anymore (their SL/TP/expiry context is stale).
         const engine = getExecutionEngine();
+        let staleClosed = 0;
         for (const pos of openPositions) {
-          const age = now - new Date(pos.openedAt).getTime();
-          if (age > STALE_THRESHOLD_MS) {
-            try {
-              await engine.closePosition(pos.id, `STARTUP CLEANUP: position open ${Math.round(age / 60000)} min`);
-              staleClosed++;
-            } catch {
-              await db.position.update({
-                where: { id: pos.id },
-                data: { status: 'CLOSED', closedAt: new Date() },
-              });
-              staleClosed++;
-            }
+          try {
+            await engine.closePosition(pos.id, `STARTUP CLEANUP: position from previous session`);
+            staleClosed++;
+          } catch {
+            // Force-close directly in DB if engine fails
+            await db.position.update({
+              where: { id: pos.id },
+              data: { status: 'CLOSED', closedAt: new Date() },
+            });
+            staleClosed++;
           }
         }
+        // Also close any associated OPEN trades
+        const openTrades = await db.trade.findMany({ where: { status: 'OPEN' } });
+        for (const trade of openTrades) {
+          try {
+            await db.trade.update({
+              where: { id: trade.id },
+              data: { status: 'CLOSED' },
+            });
+          } catch { /* ignore */ }
+        }
         if (staleClosed > 0) {
-          log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones huérfanas cerradas (>40 min)`);
+          log('INFO', `🧹 CLEANUP: ${staleClosed} posiciones de sesión anterior cerradas + ${openTrades.length} trades limpiados`);
         } else {
-          log('INFO', `📊 ${openPositions.length} posiciones abiertas activas (dentro del expiry)`);
+          log('INFO', `📊 Sin posiciones abiertas de sesiones anteriores`);
         }
       }
     }
