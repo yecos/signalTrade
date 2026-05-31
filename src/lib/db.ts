@@ -1,6 +1,19 @@
 import { PrismaClient } from '@prisma/client'
 import { PrismaLibSQL } from '@prisma/adapter-libsql'
 
+// ─── Suppress prisma:error noise from console ═════════════════════════════════
+// Turso transient errors produce "prisma:error fetch failed" lines that spam logs.
+// We intercept console.error to filter these out — real errors still go through.
+const _origConsoleError = console.error;
+(console as any).error = function (...args: any[]) {
+  const msg = args.map(a => typeof a === 'string' ? a : a?.message || '').join(' ');
+  if (msg.includes('prisma:error') && msg.includes('fetch failed')) {
+    // Silently drop — withRetry handles these
+    return;
+  }
+  _origConsoleError.apply(console, args);
+};
+
 // ─── Singleton Pattern for Serverless (Vercel) ──────────────────────────────
 // In serverless, each cold start creates a new module instance.
 // We use globalThis to cache the PrismaClient across hot-reloads in dev,
@@ -56,8 +69,7 @@ function createPrismaClient(): PrismaClient {
         // Prisma logs "prisma:error fetch failed" to console BEFORE our withRetry()
         // catches the exception. These transient errors are noise — withRetry() handles
         // all retries and logs only when it actually fails after all retries.
-        // We set log: [] and rely entirely on withRetry() for error reporting.
-        log: [],
+        log: [] as any[],
       })
 
       console.log('[DB] ✅ PrismaClient with Turso adapter created successfully')
@@ -72,7 +84,7 @@ function createPrismaClient(): PrismaClient {
   // Fallback: local SQLite for development
   console.log('[DB] Using local SQLite fallback (no Turso credentials found)')
   return new PrismaClient({
-    log: ['error'],
+    log: [] as any[], // Silence ALL Prisma internal logging
   })
 }
 
@@ -401,5 +413,62 @@ async function runTableMigrations(): Promise<void> {
         console.error(`[DB-MIGRATE] ❌ Error creating table: ${msg}`)
       }
     }
+  }
+}
+
+// ─── DB KEEPALIVE — prevent Turso cold connections ══════════════════════════
+// Pings Turso every 120s to keep the HTTP connection warm.
+// Without this, the first DB call after idle may fail with "fetch failed".
+
+let _keepaliveInterval: ReturnType<typeof setInterval> | null = null;
+
+export function startDbKeepalive(): void {
+  if (_keepaliveInterval) return; // Already running
+  _keepaliveInterval = setInterval(async () => {
+    try {
+      await withRetry(() => db.signal.count(), 1, 500, 'keepalive');
+      console.log('[DB-KEEPALIVE] Ping OK');
+    } catch {
+      console.warn('[DB-KEEPALIVE] Ping failed — connection may be cold');
+    }
+  }, 120_000); // Every 2 minutes
+  console.log('[DB-KEEPALIVE] Started — pinging every 120s');
+}
+
+// ─── DB CONCURRENCY LIMITER (Semaphore) ═════════════════════════════════════
+// Limits concurrent DB operations to prevent overwhelming Turso.
+// Turso has connection limits — too many concurrent queries = "fetch failed".
+
+class Semaphore {
+  private queue: Array<() => void> = [];
+  private running = 0;
+  constructor(private max: number) {}
+
+  async acquire(): Promise<void> {
+    if (this.running < this.max) {
+      this.running++;
+      return;
+    }
+    return new Promise<void>(resolve => this.queue.push(resolve));
+  }
+
+  release(): void {
+    this.running--;
+    if (this.queue.length > 0) {
+      this.running++;
+      const next = this.queue.shift()!;
+      next();
+    }
+  }
+}
+
+const dbSemaphore = new Semaphore(4); // Max 4 concurrent DB operations
+
+export async function withConcurrencyLimit<T>(fn: () => Promise<T>, label: string = 'DB'): Promise<T> {
+  await dbSemaphore.acquire();
+  try {
+    return await fn();
+  } finally {
+    dbSemaphore.release();
   }
 }

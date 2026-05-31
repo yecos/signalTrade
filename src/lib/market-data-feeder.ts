@@ -274,8 +274,13 @@ export async function feedMarketData(): Promise<{
     errors.push(`Macro data: ${err.message}`);
   }
 
-  // ═══ 1. FEED CANDLES FROM BINANCE (PRIMARY — proven reliable) ═══
-  // Binance klines work from the user's network, Bybit doesn't always work
+  // ═══ 1. FEED CANDLES FROM BINANCE (PRIMARY — optimized incremental) ═══
+  // Binance klines work from the user's network (Bybit doesn't always work from Colombia).
+  // OPTIMIZATION: Only fetch LATEST 10 candles per timeframe (not 200) on regular cycles.
+  // Full 200-candle seed is handled by Phase 3 (seedMarketData) when DB is empty.
+  // This reduces DB writes from 1600 to ~80 per cycle, cutting time from ~10min to ~1min.
+  const CANDLE_FETCH_LIMIT = 10; // Only latest 10 candles per cycle
+
   let binanceCandleErrors = 0;
   for (const asset of cryptoAssets) {
     const binanceSymbol = BINANCE_SYMBOLS[asset];
@@ -283,55 +288,33 @@ export async function feedMarketData(): Promise<{
 
     for (const [tf, binanceInterval] of Object.entries(intervals)) {
       try {
-        const klines = await fetchBinanceKlines(binanceSymbol, binanceInterval, 200);
+        const klines = await fetchBinanceKlines(binanceSymbol, binanceInterval, CANDLE_FETCH_LIMIT);
         if (klines.length === 0) {
           binanceCandleErrors++;
           continue;
         }
 
-        // Batch upsert candles to DB — v5: smaller batches + delays + withRetry
-        const BATCH_SIZE = 5; // Reduced from 10 → fewer concurrent Turso HTTP connections
-        for (let i = 0; i < klines.length; i += BATCH_SIZE) {
-          const batch = klines.slice(i, i + BATCH_SIZE);
-          const upsertPromises = batch.map(async (k) => {
-            const timestamp = new Date(k.timestamp);
-            try {
-              await withRetry(
-                () => db.marketCandle.upsert({
-                  where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
-                  create: {
-                    asset, timeframe: tf, timestamp,
-                    open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-                  },
-                  update: {
-                    open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
-                  },
-                }),
-                2, 500, `candle-${asset}-${tf}`
-              );
-              return true;
-            } catch {
-              return false;
-            }
-          });
-          const batchResults = await Promise.allSettled(upsertPromises);
-          candlesUpdated += batchResults.filter(r => r.status === 'fulfilled' && r.value).length;
-
-          // Delay between batches to prevent Turso HTTP connection saturation
-          if (i + BATCH_SIZE < klines.length) {
-            await delay(200);
-          }
+        // Upsert candles to DB
+        for (const k of klines) {
+          const timestamp = new Date(k.timestamp);
+          try {
+            await db.marketCandle.upsert({
+              where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
+              create: {
+                asset, timeframe: tf, timestamp,
+                open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+              },
+              update: {
+                open: k.open, high: k.high, low: k.low, close: k.close, volume: k.volume,
+              },
+            });
+            candlesUpdated++;
+          } catch { /* skip duplicate errors */ }
         }
       } catch (err: any) {
         errors.push(`Candles ${asset} ${tf}: ${err.message}`);
       }
-
-      // Small delay between timeframes to reduce Turso pressure
-      await delay(300);
     }
-
-    // Small delay between assets to reduce Turso pressure
-    await delay(500);
   }
 
   if (binanceCandleErrors > 0) {

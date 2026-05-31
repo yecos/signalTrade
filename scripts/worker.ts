@@ -395,7 +395,7 @@ async function monitorOpenPositions(): Promise<{ closedBySLTP: number; expired: 
   return { closedBySLTP, expired };
 }
 
-// ─── Phase 3: Seed market data candles ──────────────────────────────────────
+// ─── Phase 3: Seed market data candles (OPTIMIZED — only seed when needed) ──
 async function seedMarketData(): Promise<{ seeded: number; total: number }> {
   const assets = ['EUR/USD', 'GBP/USD', 'BTC/USD', 'ETH/USD', 'USD/JPY'];
   const timeframes = ['M5', 'M15', 'H1', 'H4']; // MTF: seed all timeframes
@@ -435,8 +435,34 @@ async function seedMarketData(): Promise<{ seeded: number; total: number }> {
               // Skip DB errors
             }
           }
+        } else if (existingCount >= 50) {
+          // Have some history — only fetch latest 20 candles (not full seed)
+          const result = await getEngineCandles(asset, tf, 20);
+          if (result.candles && result.candles.length > 0) {
+            let upserted = 0;
+            for (const candle of result.candles) {
+              const timestamp = new Date(candle.timestamp);
+              try {
+                await db.marketCandle.upsert({
+                  where: { asset_timeframe_timestamp: { asset, timeframe: tf, timestamp } },
+                  create: {
+                    asset, timeframe: tf, timestamp,
+                    open: candle.open, high: candle.high, low: candle.low,
+                    close: candle.close, volume: candle.volume,
+                  },
+                  update: {
+                    open: candle.open, high: candle.high, low: candle.low,
+                    close: candle.close, volume: candle.volume,
+                  },
+                });
+                upserted++;
+              } catch { /* skip */ }
+            }
+            if (upserted > 0 && tf === 'M5') seeded++;
+            log('INFO', `  📊 ${asset} ${tf}: ${existingCount} velas → +${upserted} incrementales`);
+          }
         } else {
-          // Not enough history — seed from engine (CRITICAL for MTF analysis)
+          // Not enough history (< 50) — seed from engine (CRITICAL for MTF analysis)
           const { seedCandlesFromEngine } = await import('../src/lib/market-data');
           const count = await seedCandlesFromEngine(asset, tf);
           if (count > 0 && tf === 'M5') seeded++;
@@ -590,13 +616,18 @@ async function runCycle(): Promise<void> {
   let verified = 0;
   let errors = 0;
 
+  // ═══ PHASE TIMING — identify bottlenecks ═══
+  const phaseTimes: Record<string, number> = {};
+
   // Phase 1: Verify pending signals
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 1: Verificando señales pendientes...');
     const verifyResult = await verifyPendingSignals();
     verified = verifyResult.closed;
     state.totalSignalsVerified += verifyResult.verified;
-    log('CYCLE', `  → ${verifyResult.closed} cerradas, ${verifyResult.verified} con precio real, ${verifyResult.unverifiable} inverificables`);
+    phaseTimes['P1'] = Date.now() - t0;
+    log('CYCLE', `  → ${verifyResult.closed} cerradas, ${verifyResult.verified} con precio real, ${verifyResult.unverifiable} inverificables [${phaseTimes['P1']}ms]`);
   } catch (err: any) {
     log('ERROR', `Fase 1 error: ${err.message}`);
     errors++;
@@ -604,11 +635,13 @@ async function runCycle(): Promise<void> {
 
   // Phase 2: Auto-trader
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 2: Auto-Trader...');
     const traderResult = await runAutoTrader();
     generated = traderResult.generated;
     state.totalSignalsGenerated += generated;
-    log('CYCLE', `  → ${traderResult.generated} generadas, ${traderResult.skipped} omitidas`);
+    phaseTimes['P2'] = Date.now() - t0;
+    log('CYCLE', `  → ${traderResult.generated} generadas, ${traderResult.skipped} omitidas [${phaseTimes['P2']}ms]`);
     if (traderResult.errors.length > 0) {
       traderResult.errors.forEach(e => log('WARN', `  ⚠ ${e}`));
       errors += traderResult.errors.length;
@@ -620,9 +653,11 @@ async function runCycle(): Promise<void> {
 
   // Phase 2.5: Monitor open positions (SL/TP + expiration)
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 2.5: Monitoreando posiciones abiertas...');
     const monitorResult = await monitorOpenPositions();
-    log('CYCLE', `Position monitoring: ${monitorResult.closedBySLTP} closed by SL/TP, ${monitorResult.expired} expired`);
+    phaseTimes['P2.5'] = Date.now() - t0;
+    log('CYCLE', `Position monitoring: ${monitorResult.closedBySLTP} closed by SL/TP, ${monitorResult.expired} expired [${phaseTimes['P2.5']}ms]`);
   } catch (err: any) {
     log('ERROR', `Fase 2.5 error: ${err.message}`);
     errors++;
@@ -630,9 +665,11 @@ async function runCycle(): Promise<void> {
 
   // Phase 3: Seed market data
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 3: Actualizando datos de mercado...');
     const seedResult = await seedMarketData();
-    log('CYCLE', `  → ${seedResult.seeded}/${seedResult.total} assets actualizados`);
+    phaseTimes['P3'] = Date.now() - t0;
+    log('CYCLE', `  → ${seedResult.seeded}/${seedResult.total} assets actualizados [${phaseTimes['P3']}ms]`);
   } catch (err: any) {
     log('ERROR', `Fase 3 error: ${err.message}`);
     errors++;
@@ -640,12 +677,14 @@ async function runCycle(): Promise<void> {
 
   // Phase 3.5: Sync account balance from Bybit
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 3.5: Sincronizando balance de cuenta...');
     const syncResult = await syncAccountBalance();
+    phaseTimes['P3.5'] = Date.now() - t0;
     if (syncResult.synced) {
-      log('CYCLE', `Balance sync: $${syncResult.balance!.toFixed(2)} balance, $${syncResult.equity!.toFixed(2)} equity from Bybit`);
+      log('CYCLE', `Balance sync: $${syncResult.balance!.toFixed(2)} balance, $${syncResult.equity!.toFixed(2)} equity from Bybit [${phaseTimes['P3.5']}ms]`);
     } else {
-      log('CYCLE', `  → Balance sync skipped (paper trading or unavailable)`);
+      log('CYCLE', `  → Balance sync skipped (paper trading or unavailable) [${phaseTimes['P3.5']}ms]`);
     }
   } catch (err: any) {
     // Balance sync failure is non-critical — don't count as error
@@ -654,10 +693,12 @@ async function runCycle(): Promise<void> {
 
   // Phase 4: Health check
   try {
+    const t0 = Date.now();
     await checkEngineHealth();
     const activeSources = Object.values(state.engineStatus?.sources || {})
       .filter(s => s !== 'OFFLINE').length;
-    log('CYCLE', `Fase 4: Engine ${activeSources} fuentes activas, calidad ${state.engineStatus?.dataQuality}`);
+    phaseTimes['P4'] = Date.now() - t0;
+    log('CYCLE', `Fase 4: Engine ${activeSources} fuentes activas, calidad ${state.engineStatus?.dataQuality} [${phaseTimes['P4']}ms]`);
   } catch (err: any) {
     log('ERROR', `Fase 4 error: ${err.message}`);
     errors++;
@@ -666,16 +707,18 @@ async function runCycle(): Promise<void> {
   // ═══ Phase 5: Feed advanced market data from Bybit ═══
   // Klines (candles), Open Interest, Funding Rate, Order Book, Instruments
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 5: Alimentando datos avanzados de mercado...');
     const feedResult = await feedMarketData();
     state.totalMarketDataFeeds++;
+    phaseTimes['P5'] = Date.now() - t0;
     if (feedResult.errors.length > 0) {
       feedResult.errors.slice(0, 3).forEach(e => log('WARN', `  ⚠ ${e}`));
     }
 
     // Log market summary (includes macro + per-asset sentiment)
     const marketSummary = getMarketSummary();
-    log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit, ${feedResult.sentimentsUpdated} sentimientos | ${marketSummary}`);
+    log('CYCLE', `  → ${feedResult.candlesUpdated} velas Bybit, ${feedResult.sentimentsUpdated} sentimientos | ${marketSummary} [${phaseTimes['P5']}ms]`);
   } catch (err: any) {
     log('WARN', `Fase 5: Market data feed error — ${err.message}`);
     // Non-critical, don't count as error
@@ -685,12 +728,14 @@ async function runCycle(): Promise<void> {
   // Funding Arb + Grid Trading + Mean Reversion + Order Flow
   // + AI Market Analyzer for adaptive parameter adjustment
   try {
+    const t0 = Date.now();
     log('CYCLE', 'Fase 6: Strategy Manager (Mean Reversion + IA adaptativa)...');
     const { executeStrategyCycle, getStrategyManagerConfig } = await import('../src/lib/strategy-manager');
     const strategyConfig = getStrategyManagerConfig();
 
     if (strategyConfig.enabled) {
       const strategyResult = await executeStrategyCycle();
+      phaseTimes['P6'] = Date.now() - t0;
 
       // Log strategy results
       if (strategyResult.fundingArb.executed) {
@@ -748,8 +793,10 @@ async function runCycle(): Promise<void> {
       if (strategyResult.circuitBreakerTriggered) {
         log('ERROR', '🚨 CIRCUIT BREAKER ACTIVADO — Todas las estrategias detenidas');
       }
+      log('CYCLE', `  → Strategy Manager [${phaseTimes['P6']}ms]`);
     } else {
-      log('CYCLE', `  → Strategy Manager deshabilitado. Activar con /set-strategy-config`);
+      phaseTimes['P6'] = Date.now() - t0;
+      log('CYCLE', `  → Strategy Manager deshabilitado. Activar con /set-strategy-config [${phaseTimes['P6']}ms]`);
     }
   } catch (err: any) {
     log('WARN', `Fase 6: Strategy Manager error — ${err.message}`);
@@ -773,6 +820,13 @@ async function runCycle(): Promise<void> {
   if (state.cycleHistory.length > 20) state.cycleHistory.shift();
 
   log('CYCLE', `═══ Ciclo completado en ${(duration / 1000).toFixed(1)}s | Generadas: ${generated} | Verificadas: ${verified} | Errores: ${errors} ═══`);
+
+  // ═══ PHASE TIMING SUMMARY — identify slow phases ═══
+  const timingSummary = Object.entries(phaseTimes)
+    .sort(([, a], [, b]) => b - a) // Sort by time descending (slowest first)
+    .map(([phase, ms]) => `${phase}:${(ms / 1000).toFixed(1)}s`)
+    .join(' | ');
+  log('CYCLE', `⏱️ Timing: ${timingSummary} | Total: ${(duration / 1000).toFixed(1)}s`);
   state.isRunning = false;
 }
 
@@ -1230,18 +1284,23 @@ async function main(): Promise<void> {
 
   // Test DB connection
   try {
-    const { testConnection } = await import('../src/lib/db');
+    const { testConnection, startDbKeepalive } = await import('../src/lib/db');
     const dbOk = await testConnection();
     if (!dbOk) {
       log('ERROR', 'No se pudo conectar a Turso DB. Verifica TURSO_DATABASE_URL en .env');
       process.exit(1);
     }
     log('INFO', '✅ Turso DB conectado');
+    // Start keepalive to prevent cold connections
+    startDbKeepalive();
   } catch (err: any) {
     // testConnection might not exist, try a simple query
     try {
       await withRetry(() => db.signal.count(), 2, 500, 'startup-count');
       log('INFO', '✅ Turso DB conectado (count test)');
+      // Start keepalive
+      const { startDbKeepalive } = await import('../src/lib/db');
+      startDbKeepalive();
     } catch {
       log('ERROR', `No se pudo conectar a Turso DB: ${err.message}`);
       process.exit(1);
